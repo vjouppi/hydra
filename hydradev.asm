@@ -84,7 +84,10 @@
 ; 1.33 -- 940217 (JM)
 ;	- Yet another bug fix (was using a signed branch in a bad place :-)
 ;
+; 1.34 -- skipped (JM version which saves register when calling the
+;	  callback routines)
 ;
+; 1.35 -- trying to add PacketFilter support...
 ;
 ; if DEBUG is defined, the device writes a lot of debugging
 ; info to the serial port (with RawPutChar())
@@ -104,6 +107,7 @@
 		include	'exec/initializers.i'
 		include	'devices/timer.i'
 		include	'utility/tagitem.i'
+		include	'utility/hooks.i'
 		include	'libraries/configvars.i'
 		include	'hardware/intbits.i'
 		include	'hardware/cia.i'
@@ -149,7 +153,7 @@ NIC_Delay	macro
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	33
+DEV_REVISION	equ	35
 
 ;
 ; start of the first hunk of the device file
@@ -176,7 +180,7 @@ dev_idstring	dc.b	'hydradev '
 		StrNumber DEV_VERSION
 		dc.b	'.'
 		StrNumber DEV_REVISION
-		dc.b	' (17.02.94)',CR,LF,0
+		dc.b	' (01.04.94)',CR,LF,0
 
 copyright_msg	dc.b	'Copyright © 1992,1993,1994 by JMP-Electronics, Finland',CR,LF,0
 
@@ -513,7 +517,7 @@ InitBuffManagement
 		endc
 
 		moveq	#buffm_Sizeof,d0
-		move.l	#MEMF_PUBLIC,d1
+		move.l	#MEMF_PUBLIC!MEMF_CLEAR,d1
 		lib	Exec,AllocMem
 		tst.l	d0
 		beq	initbuffm_exit
@@ -539,7 +543,12 @@ buffm_tag_loop	move.l	(a2)+,d0
 		move.l	(a2)+,buffm_CopyFromBuff(a3)
 		bra.b	buffm_tag_loop
 
-2$		subq.l	#TAG_IGNORE,d0
+2$		cmp.l	#S2_PACKETFILTER,d0
+		bne.b	21$
+		move.l	(a2)+,buffm_PacketFilter(a3)
+		bra.b	buffm_tag_loop
+
+21$		subq.l	#TAG_IGNORE,d0
 		bne.b	3$
 
 55$		addq.l	#4,a2
@@ -2170,11 +2179,11 @@ ActualSendPacket
 		move.l	IOS2_DATALENGTH(a2),d0
 		move.l	IOS2_DATA(a2),a1
 		lea	du_TxBuff+14(a3),a0
-		move.l	a2,-(sp)
+		movem.l	d2-d7/a2-a6,-(sp)
 		move.l	IOS2_BUFFERMANAGEMENT(a2),a2
 		move.l	buffm_CopyFromBuff(a2),a2
 		jsr	(a2)
-		move.l	(sp)+,a2
+		movem.l	(sp)+,d2-d7/a2-a6
 		tst.l	d0
 		beq	tx_buffm_error
 		moveq	#14,d0
@@ -2184,11 +2193,11 @@ ActualSendPacket
 raw_packet	move.l	IOS2_DATALENGTH(a2),d0
 		move.l	IOS2_DATA(a2),a1
 		lea	du_TxBuff(a3),a0
-		move.l	a2,-(sp)
+		movem.l	d2-d7/a2-a6,-(sp)
 		move.l	IOS2_BUFFERMANAGEMENT(a2),a2
 		move.l	buffm_CopyFromBuff(a2),a2
 		jsr	(a2)
-		move.l	(sp)+,a2
+		movem.l	(sp)+,d2-d7/a2-a6
 		tst.l	d0
 		beq	tx_buffm_error
 
@@ -2276,7 +2285,7 @@ ReadTallyCounters
 ;
 ; IS_DATA is pointer to the device unit structure
 ;
-NIC_IntRoutine	movem.l	d2/a2/a3/a4/a6,-(sp)
+NIC_IntRoutine	movem.l	d2/d3/d4/a2/a3/a4/a6,-(sp)
 		move.l	a1,a3
 		move.l	du_DevicePtr(a3),a6
 		move.l	du_BoardAddr1(a3),a4
@@ -2410,125 +2419,99 @@ get_packet_type
 ;
 		addq.l	#1,du_PacketsReceived(a3)
 
-		move.w	$10(a4),d0	; get packet type
+		move.w	$10(a4),d3	; get packet type
 
 		ifd	DEBUG
+		move.l	d3,d0
 		ext.l	d0
 		DMSG	<'Packet type = $%lx',LF>
 		endc
 
-		cmp.w	#1500,d0
+		moveq	#0,d4		;Packet copied-flag
+
+		cmp.w	#1500,d3
 		bhi.b	find_ethernet_ioreq
 
 ;
 ; IEEE802.3 packet
 ;
-		move.w	#1500,d0
+		move.w	#1500,d3
 		move.l	du_RxQueue+MLH_HEAD(a3),a2
 find_ieee802_loop
-		move.l	(a2),d1
+		tst.l	(a2)
 		beq	orphan_packet
-		cmp.w	IOS2_PACKETTYPE+2(a2),d0
-		bcc.b	copy_rec_packet
-		move.l	d1,a2
+		cmp.w	IOS2_PACKETTYPE+2(a2),d3
+		bcs.b	find_ieee802_next
+
+		tst.b	d4
+		bne.b	1$
+		bsr	CopyRecPacket
+		moveq	#1,d4		;set packet copied-flag
+
+1$		move.l	IOS2_BUFFERMANAGEMENT(a2),a0
+		move.l	buffm_PacketFilter(a0),d0
+		beq	get_rec_packet
+		move.l	d0,a0
+;
+; call the packet filter hook
+;
+; hmm... the iorequest address just
+; happens to be in a2 as the callback expects it...
+;
+		lea	du_RxBuff+14(a3),a1
+		btst	#SANA2IOB_RAW,IO_FLAGS(a2)
+		beq.b	2$
+		sub.w	#14,a1
+2$		movem.l	d2-d7/a2-a6,-(sp)
+		move.l	h_Entry(a0),a3
+		jsr	(a3)
+		movem.l	(sp)+,d2-d7/a2-a6
+		tst.l	d0
+		bne.b	get_rec_packet
+
+find_ieee802_next
+		move.l	(a2),a2
 		bra.b	find_ieee802_loop
 
 find_ethernet_ioreq
 		move.l	du_RxQueue+MLH_HEAD(a3),a2
 
 find_rec_ioreq_loop
-		move.l	(a2),d1
+		tst.l	(a2)
 		beq	orphan_packet
-		cmp.w	IOS2_PACKETTYPE+2(a2),d0
-		beq.b	copy_rec_packet
-		move.l	d1,a2
+		cmp.w	IOS2_PACKETTYPE+2(a2),d3
+		bne.b	find_rec_ioreq_next
+		tst.b	d4
+		bne.b	1$
+		bsr	CopyRecPacket
+		moveq	#1,d4		;set packet copied-flag
+
+1$		move.l	IOS2_BUFFERMANAGEMENT(a2),a0
+		move.l	buffm_PacketFilter(a0),d0
+		beq.b	get_rec_packet
+		move.l	d0,a0
+;
+; call the packet filter hook
+;
+; hmm... the iorequest address just
+; happens to be in a2 as the callback expects it...
+;
+		lea	du_RxBuff+14(a3),a1
+		btst	#SANA2IOB_RAW,IO_FLAGS(a2)
+		beq.b	2$
+		sub.w	#14,a1
+2$		movem.l	d2-d7/a2-a6,-(sp)
+		move.l	h_Entry(a0),a3
+		jsr	(a3)
+		movem.l	(sp)+,d2-d7/a2-a6
+		tst.l	d0
+		bne.b	get_rec_packet
+
+find_rec_ioreq_next
+		move.l	(a2),a2
 		bra.b	find_rec_ioreq_loop
 
-;
-; copy packet to du_RxBuff
-; now a2 points to iorequest
-;
-copy_rec_packet
-		ifd	DEBUG
-		move.l	a2,d0
-		move.l	d2,d1
-		DMSG	<'Copy packet (iorequest = $%lx, packet length = %ld)',LF>
-		endc
-
-		move.b	du_PStop(a3),d0
-		sub.b	du_NextPkt(a3),d0
-		lsl.w	#8,d0
-		subq.w	#4,d0
-; space from packet start to buffer RAM end, in bytes
-; (four bytes of status information before the packet not counted)
-; compare with packet length
-		cmp.w	d0,d2
-		bhi	rec_wrap
-
-		ifd	DEBUG
-		ext.l	d0
-		DMSG	<'Receive with no wrap (space $%lx)',LF>
-		endc
-
-		lea	4(a4),a0
-		lea	du_RxBuff(a3),a1
-		move.w	d2,d0		;packet length
-		addq.w	#3,d0
-		lsr.w	#2,d0	;number of longwords
-
-		ifd	DEBUG
-		DMSG	<'Receive copy1 length = $%lx longwords',LF>
-		endc
-		bra.b	rec_copy1_entry
-
-rec_copy1_loop	move.l	(a0)+,(a1)+
-rec_copy1_entry	dbf	d0,rec_copy1_loop
-		bra	packet_copied
-
-rec_wrap
-		ifd	DEBUG
-		ext.l	d0
-		DMSG	<'Receive packet buffer wrap (space $%lx)',LF>
-		endc
-
-		lea	4(a4),a0
-		lea	du_RxBuff(a3),a1
-		move.w	d0,d1
-		lsr.w	#2,d0
-
-		ifd	DEBUG
-		DMSG	<'Receive copy2 length = $%lx longwords',LF>
-		endc
-		bra.b	rec_copy2_entry
-
-rec_copy2_loop	move.l	(a0)+,(a1)+
-rec_copy2_entry	dbf	d0,rec_copy2_loop
-
-		moveq	#0,d0
-		move.b	du_PStart(a3),d0
-		lsl.w	#8,d0
-		move.l	du_BoardAddr(a3),a0
-		add.l	d0,a0			; changed to add.l by JM 940217
-
-		ifd	DEBUG
-		move.l	a0,d0
-		DMSG	<'Wrap, continue at $%lx',LF>
-		endc
-
-		move.w	d2,d0	;packet length
-		sub.w	d1,d0
-		addq.w	#3,d0
-		lsr.w	#2,d0
-
-		ifd	DEBUG
-		DMSG	<'Receive copy3 length = $%lx longwords',LF>
-		endc
-		bra.b	rec_copy3_entry
-
-rec_copy3_loop	move.l	(a0)+,(a1)+
-rec_copy3_entry	dbf	d0,rec_copy3_loop
-
-packet_copied
+get_rec_packet
 ;
 ; probably should move the boundary pointer here...
 ;
@@ -2564,11 +2547,11 @@ packet_copied
 
 3$		move.l	d0,IOS2_DATALENGTH(a2)
 		move.l	IOS2_DATA(a2),a0
-		move.l	a2,-(sp)
+		movem.l	d2-d7/a2-a6,-(sp)
 		move.l	IOS2_BUFFERMANAGEMENT(a2),a2
 		move.l	buffm_CopyToBuff(a2),a2
 		jsr	(a2)
-		move.l	(sp)+,a2
+		movem.l	(sp)+,d2-d7/a2-a6
 		tst.l	d0
 		bne.b	4$
 
@@ -2620,9 +2603,13 @@ orphan_packet
 		DMSG	<'Orphan packet',LF>
 		endc
 
-		move.l	du_RxOrphanQueue+MLH_TAILPRED(a3),a2
+		tst.b	d4
+		bne.b	1$
+		bsr	CopyRecPacket
+
+1$		move.l	du_RxOrphanQueue+MLH_TAILPRED(a3),a2
 		tst.l	MLN_PRED(a2)
-		bne	copy_rec_packet
+		bne	get_rec_packet
 
 		ifd	DEBUG
 		DMSG	<'Packet dropped',LF>
@@ -2872,8 +2859,98 @@ nic_int_ok	moveq	#1,d0
 nic_int_continue
 		moveq	#0,d0
 
-nic_int_end	movem.l	(sp)+,d2/a2/a3/a4/a6
+nic_int_end	movem.l	(sp)+,d2/d3/d4/a2/a3/a4/a6
 		rts
+
+;
+; copy packet to du_RxBuff -- used by the receive interrupt
+;
+; d2 -- packet length
+; a2 -- iorequest (not actually used by this routine)
+; a3 -- unit
+; a4 -- pointer to the card's RAM buffer at the start of this packet
+;
+CopyRecPacket
+		ifd	DEBUG
+		move.l	a2,d0
+		move.l	d2,d1
+		DMSG	<'Copy packet (iorequest = $%lx, packet length = %ld)',LF>
+		endc
+
+		move.b	du_PStop(a3),d0
+		sub.b	du_NextPkt(a3),d0
+		lsl.w	#8,d0
+		subq.w	#4,d0
+; space from packet start to buffer RAM end, in bytes
+; (four bytes of status information before the packet not counted)
+; compare with packet length
+		cmp.w	d0,d2
+		bhi	rec_wrap
+
+		ifd	DEBUG
+		ext.l	d0
+		DMSG	<'Receive with no wrap (space $%lx)',LF>
+		endc
+
+		lea	4(a4),a0
+		lea	du_RxBuff(a3),a1
+		move.w	d2,d0		;packet length
+		addq.w	#3,d0
+		lsr.w	#2,d0	;number of longwords
+
+		ifd	DEBUG
+		DMSG	<'Receive copy1 length = $%lx longwords',LF>
+		endc
+		bra.b	rec_copy1_entry
+
+rec_copy1_loop	move.l	(a0)+,(a1)+
+rec_copy1_entry	dbf	d0,rec_copy1_loop
+		bra	packet_copied
+
+rec_wrap
+		ifd	DEBUG
+		ext.l	d0
+		DMSG	<'Receive packet buffer wrap (space $%lx)',LF>
+		endc
+
+		lea	4(a4),a0
+		lea	du_RxBuff(a3),a1
+		move.w	d0,d1
+		lsr.w	#2,d0
+
+		ifd	DEBUG
+		DMSG	<'Receive copy2 length = $%lx longwords',LF>
+		endc
+		bra.b	rec_copy2_entry
+
+rec_copy2_loop	move.l	(a0)+,(a1)+
+rec_copy2_entry	dbf	d0,rec_copy2_loop
+
+		moveq	#0,d0
+		move.b	du_PStart(a3),d0
+		lsl.w	#8,d0
+		move.l	du_BoardAddr(a3),a0
+		add.l	d0,a0			; changed to add.l by JM 940217
+
+		ifd	DEBUG
+		move.l	a0,d0
+		DMSG	<'Wrap, continue at $%lx',LF>
+		endc
+
+		move.w	d2,d0	;packet length
+		sub.w	d1,d0
+		addq.w	#3,d0
+		lsr.w	#2,d0
+
+		ifd	DEBUG
+		DMSG	<'Receive copy3 length = $%lx longwords',LF>
+		endc
+		bra.b	rec_copy3_entry
+
+rec_copy3_loop	move.l	(a0)+,(a1)+
+rec_copy3_entry	dbf	d0,rec_copy3_loop
+
+packet_copied	rts
 
 ;;;;
 		ifd	DEBUG

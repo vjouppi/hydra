@@ -24,8 +24,8 @@ EADDR_BYTES	equ	6
 		 STRUCT	du_DefaultAddr,EADDR_BYTES
 		 STRUCT	du_CurrentAddr,EADDR_BYTES
 		 STRUCT	du_NIC_Intr,IS_SIZE
+		 STRUCT	du_CookieList,MLH_SIZE
 		 STRUCT	du_TxQueue,MLH_SIZE
-		 STRUCT	du_RxQueue,MLH_SIZE
 		 STRUCT	du_RxOrphanQueue,MLH_SIZE
 		 STRUCT	du_EventList,MLH_SIZE
 		 STRUCT	du_TypeTrackList,MLH_SIZE
@@ -87,11 +87,13 @@ EADDR_BYTES	equ	6
 ;
 ; Buffer management 'magic cookie'
 ;
-		STRUCTURE BuffManagement,0
-		 APTR	buffm_CopyToBuff
-		 APTR	buffm_CopyFromBuff
-		 UBYTE	buffm_Flags
-		LABEL buffm_Sizeof
+		STRUCTURE MagicCookie,MLN_SIZE
+		 APTR	cookie_CopyToBuff
+		 APTR	cookie_CopyFromBuff
+		 APTR	cookie_PacketFilter
+		 STRUCT	cookie_RxQueue,MLH_SIZE
+		 UBYTE	cookie_Flags
+		LABEL cookie_Sizeof
 
 		BITDEF	BFM,PROM,0
 
