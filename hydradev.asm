@@ -94,7 +94,10 @@
 ;	  Fixed a bug in find_rec_ioreq_loop, it jumped to orphan_packet,
 ;	  where it should jump to find_rec_ioreq_cookie_next...
 ;
-; 1.39 -- fixing multiple read queues to work the way they should...
+; 1.39 -- fixed multiple read queues to work the way they should...
+;
+; 1.40 -- fixed promiscuous mode flag bit check in close routine
+;	  fixed collision statistics (but still not sure if it really works)
 ;
 
 ;
@@ -162,7 +165,7 @@ NIC_Delay	macro
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	39
+DEV_REVISION	equ	40
 
 ;
 ; start of the first hunk of the device file
@@ -189,7 +192,7 @@ dev_idstring	dc.b	'hydradev '
 		StrNumber DEV_VERSION
 		dc.b	'.'
 		StrNumber DEV_REVISION
-		dc.b	' (05.08.94)',CR,LF,0
+		dc.b	' (07.08.94)',CR,LF,0
 
 copyright_msg	dc.b	'Copyright © 1992,1993,1994 by JMP-Electronics / Bits & Chips, Finland',CR,LF,0
 
@@ -341,6 +344,7 @@ excl_ok2	move.l	IOS2_BUFFERMANAGEMENT(a2),a1
 		move.l	dev_SysBase(a6),a6
 		move.l	d0,a1
 ;
+; Add magic cookie to the cookie list
 ; Remember to Disable() when accessing the cookie list
 ;
 		lib	Disable
@@ -423,6 +427,7 @@ dev_Close	movem.l	a2/a3,-(sp)
 		move.l	a6,-(sp)
 		move.l	dev_SysBase(a6),a6
 ;
+; Remove magic cookie from the cookie list
 ; Remember to Disable() when accessing the cookie list
 ;
 		lib	Disable
@@ -430,14 +435,15 @@ dev_Close	movem.l	a2/a3,-(sp)
 		lib	Remove
 		lib	Enable
 		move.l	IOS2_BUFFERMANAGEMENT(a2),a1
+		move.b	cookie_Flags(a1),-(sp)
 		moveq	#cookie_Sizeof,d0
 		lib	FreeMem
+		move.b	(sp)+,d0
 		move.l	(sp)+,a6
 
 		subq.w	#1,UNIT_OPENCNT(a3)
 
-		move.l	IOS2_BUFFERMANAGEMENT(a2),a0
-		btst	#BFMB_PROM,cookie_Flags(a0)
+		btst	#BFMB_PROM,d0
 		beq.b	close_1
 
 		subq.w	#1,du_PromCount(a3)
@@ -2557,8 +2563,7 @@ find_rec_ioreq_loop
 		bsr	CopyRecPacket
 		moveq	#1,d4		;set packet copied-flag
 
-1$		move.l	IOS2_BUFFERMANAGEMENT(a2),a0
-		move.l	cookie_PacketFilter(a0),d0
+1$		move.l	cookie_PacketFilter(a5),d0
 		beq.b	get_rec_packet2
 		move.l	d0,a0
 ;
@@ -2589,38 +2594,6 @@ find_rec_ioreq_next
 		bra.b	find_rec_ioreq_loop
 
 ;
-; type tracking for received packets
-;
-		move.l	du_TypeTrackList(a3),a1
-		move.w	du_RxBuff+12(a3),d0
-		cmp.w	#1500,d0
-		bhi.b	rec_track_find_loop
-		moveq	#0,d0		;ieee802.3
-
-rec_track_find_loop
-		move.l	(a1),d1
-		beq.b	next_packet
-		cmp.w	ttn_Type(a1),d0
-		beq.b	rec_track_found
-		move.l	d1,a1
-		bra.b	rec_track_find_loop
-
-rec_track_found
-		ifd	DEBUG
-		DMSG	<'Updating TrackType RX stats',LF>
-		endc
-
-		addq.l	#1,ttn_Stat+S2PTS_RXPACKETS(a1)
-		moveq	#0,d0
-		move.w	d2,d0
-		sub.w	#18,d0
-		add.l	d0,ttn_Stat+S2PTS_RXBYTES(a1)
-		bra	next_packet
-
-get_rec_packet3	bsr	ReturnRecIOReq
-		bra	next_packet
-
-;
 ; handle orphan packets here
 ;
 orphan_packet
@@ -2628,14 +2601,18 @@ orphan_packet
 		DMSG	<'Orphan packet',LF>
 		endc
 
+		move.l	du_RxOrphanQueue+MLH_TAILPRED(a3),a2
+		tst.l	MLN_PRED(a2)
+		beq	drop_orphan
+
 		tst.b	d4
 		bne.b	1$
 		bsr	CopyRecPacket
 
-1$		move.l	du_RxOrphanQueue+MLH_TAILPRED(a3),a2
-		tst.l	MLN_PRED(a2)
-		bne	get_rec_packet3
+1$		bsr	ReturnRecIOReq
+		bra	next_packet
 
+drop_orphan
 		ifd	DEBUG
 		DMSG	<'Packet dropped',LF>
 		endc
@@ -2734,7 +2711,7 @@ transmit_ok	and.b	#%1010,d0
 		moveq	#0,d1
 		move.b	NIC_NCR(a4),d1
 		and.b	#%1111,d1
-		add.l	d1,du_Collisions(a4)
+		add.l	d1,du_Collisions(a3)
 
 ; Set IO_ERROR/WIREERROR if an error has been detected
 ; What is a good error number here??
@@ -2975,7 +2952,36 @@ rec_copy2_entry	dbf	d0,rec_copy2_loop
 rec_copy3_loop	move.l	(a0)+,(a1)+
 rec_copy3_entry	dbf	d0,rec_copy3_loop
 
-packet_copied	rts
+packet_copied
+;
+; type tracking for received packets
+;
+		move.l	du_TypeTrackList(a3),a1
+		move.w	du_RxBuff+12(a3),d0
+		cmp.w	#1500,d0
+		bhi.b	rec_track_find_loop
+		moveq	#0,d0		;ieee802.3
+
+rec_track_find_loop
+		move.l	(a1),d1
+		beq.b	track_ret
+		cmp.w	ttn_Type(a1),d0
+		beq.b	rec_track_found
+		move.l	d1,a1
+		bra.b	rec_track_find_loop
+
+rec_track_found
+		ifd	DEBUG
+		DMSG	<'Updating TrackType RX stats',LF>
+		endc
+
+		addq.l	#1,ttn_Stat+S2PTS_RXPACKETS(a1)
+		moveq	#0,d0
+		move.w	d2,d0
+		sub.w	#18,d0
+		add.l	d0,ttn_Stat+S2PTS_RXBYTES(a1)
+
+track_ret	rts
 
 ;
 ; D2 - packet length
