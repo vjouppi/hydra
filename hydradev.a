@@ -34,6 +34,9 @@
 ; 1.15	- added promiscuous mode
 ; 1.16	- small changes (event handling)
 ;
+; 1.17  - now 'Packets Received' global stat is incremented also for dropped
+;	  packets.
+;
 
 ;
 ; if DEBUG is defined, the device writes a lot of debugging
@@ -90,7 +93,7 @@ Ciaa		equ	$bfe001
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	16
+DEV_REVISION	equ	17
 
 ;
 ; start of the first hunk of the device file
@@ -117,7 +120,7 @@ dev_idstring	dc.b	'hydradev '
 		StrNumber DEV_VERSION
 		dc.b	'.'
 		StrNumber DEV_REVISION
-		dc.b	' (29.11.92)',CR,LF,0
+		dc.b	' (11.12.92)',CR,LF,0
 
 copyright_msg	dc.b	'Copyright © 1992 by Bits & Chips Oy, Finland',CR,LF,0
 
@@ -2231,7 +2234,14 @@ received_multicast_ok
 		DMSG	<'Received multicast ok',LF>
 		endc
 
-get_packet_type	move.w	$10(a4),d0	; get packet type
+get_packet_type
+;
+; increment the du_PacketsReceived count for every packet (even the
+; dropped ones)
+;
+		addq.l	#1,du_PacketsReceived(a3)
+
+		move.w	$10(a4),d0	; get packet type
 
 		ifd	DEBUG
 		ext.l	d0
@@ -2430,8 +2440,6 @@ rec_track_found
 rec_track_done	move.l	a2,a1
 		lib	Exec,Remove
 		bsr	TermIO
-
-		addq.l	#1,du_PacketsReceived(a3)
 		bra	next_packet
 
 ;
