@@ -57,6 +57,9 @@
 ;
 ; 1.24	- fixed RAM test routine (still not perfect... no shadow checking)
 ;
+; 1.25	- fixed dev_Open to work with non-zero units (not tested...)
+;	- also fixed IOS2_DATALENGTH setting with received raw packets
+;
 
 ;
 ; if DEBUG is defined, the device writes a lot of debugging
@@ -122,7 +125,7 @@ NIC_Delay	macro
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	24
+DEV_REVISION	equ	25
 
 ;
 ; start of the first hunk of the device file
@@ -273,6 +276,7 @@ dev_Open	movem.l	d2/d3/a2/a3,-(sp)
 		bne.b	unit_ok
 
 		move.l	d2,d0
+		lsr.l	#2,d0
 		bsr	Initialize_Unit
 		tst.l	d0
 		beq	open_fail
@@ -599,6 +603,7 @@ found_board	move.l	d0,a2
 		move.l	#$5555aaaa,d0
 
 ram_size_loop	move.l	d0,0(a0,d3)
+		NIC_Delay
 		cmp.l	0(a0,d3),d0
 		bne.b	ram_end
 		add.w	#$100,d3
@@ -2197,7 +2202,7 @@ tx_buffm_error	clr.l	du_CurrentTxReq(a3)	;(not really necessary)
 
 ;
 ; Read the counters 0/1/2
-; device base in a6, init in a3
+; device base in a6, unit in a3
 ;
 ; (note: the counters reset when read)
 ;
@@ -2501,7 +2506,6 @@ packet_copied
 		move.w	d2,d0
 		sub.w	#18,d0
 		ext.l	d0
-		move.l	d0,IOS2_DATALENGTH(a2)
 		lea	du_RxBuff+14(a3),a1
 		
 		btst	#SANA2IOB_RAW,IO_FLAGS(a2)
@@ -2510,7 +2514,8 @@ packet_copied
 		move.w	d2,d0
 		sub.w	#14,a1
 
-3$		move.l	IOS2_DATA(a2),a0
+3$		move.l	d0,IOS2_DATALENGTH(a2)
+		move.l	IOS2_DATA(a2),a0
 		move.l	a2,-(sp)
 		move.l	IOS2_BUFFERMANAGEMENT(a2),a2
 		move.l	buffm_CopyToBuff(a2),a2
