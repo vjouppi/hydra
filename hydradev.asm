@@ -1,8 +1,8 @@
 ;+asm
 ;add module "hash.o"
 ;do
-;copy hydradev devs:networks/hydra.device
 ;*
+;;;;copy hydradev devs:networks/hydra.device
 ;
 ; hydradev.a  --  sanaII device driver for Hydra Systems ethetnet card
 ;
@@ -66,12 +66,25 @@
 ;
 ; 1.27	- Modified card memory check routine. Now should be more reliable.
 ;
-;
 ; 1.28  - testing... more NIC_Delays and memory copy as words
 ;
 ; 1.29  - fixed queued transmit. changed copy routines to copy longwords again.
+; 1.30ß-- 940216 (JM)
+;	- now always sets RAM size to 16K (didn't help)
 ;
-
+; 1.31 -- 940217 (JM)
+;	- RAM size check finally, definately fixed by JM (was using a 16-bit
+;	  signed index which caused the test to fail with a 64Kb buffer)
+;	- Board RAM now properly accessed in interrupt routine (bug located
+;	  by TR)
+;
+; 1.32 -- 940217 (JM)
+;	- Two bugs fixed (was using 16-bit signed arithmetic, changed to 32-bit)
+;
+; 1.33 -- 940217 (JM)
+;	- Yet another bug fix (was using a signed branch in a bad place :-)
+;
+;
 ;
 ; if DEBUG is defined, the device writes a lot of debugging
 ; info to the serial port (with RawPutChar())
@@ -136,7 +149,7 @@ NIC_Delay	macro
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	29
+DEV_REVISION	equ	33
 
 ;
 ; start of the first hunk of the device file
@@ -163,9 +176,9 @@ dev_idstring	dc.b	'hydradev '
 		StrNumber DEV_VERSION
 		dc.b	'.'
 		StrNumber DEV_REVISION
-		dc.b	' (18.04.93)',CR,LF,0
+		dc.b	' (17.02.94)',CR,LF,0
 
-copyright_msg	dc.b	'Copyright © 1992,1993 by JMP-Electronics, Finland',CR,LF,0
+copyright_msg	dc.b	'Copyright © 1992,1993,1994 by JMP-Electronics, Finland',CR,LF,0
 
 expansion_name	dc.b	'expansion.library',0
 intuition_name	dc.b	'intuition.library',0
@@ -609,18 +622,23 @@ found_board	move.l	d0,a2
 ;
 ; find out the amount of RAM memory on the ethernet card
 ;
+		ifd	DEBUG
+		move.l	cd_BoardAddr(a2),d0
+		DMSG	<'Looking for card RAM at $%lx',LF>
+		endc
+
 		moveq	#0,d3
 		move.l	cd_BoardAddr(a2),a0
 		move.l	#$5555,d0
 		move.l	#$aaaa,d1
 
-ram_size_loop	move.w	d0,0(a0,d3)
-		move.w	d1,2(a0,d3)
+ram_size_loop	move.w	d0,0(a0,d3.l)		; .l's added by JM 940217
+		move.w	d1,2(a0,d3.l)
 		NIC_Delay
 		NIC_Delay
-		cmp.w	0(a0,d3),d0
+		cmp.w	0(a0,d3.l),d0
 		bne.b	ram_end
-		cmp.w	2(a0,d3),d1
+		cmp.w	2(a0,d3.l),d1
 		bne.b	ram_end
 		add.w	#$100,d3
 		cmp.w	#$ff00,d3
@@ -629,6 +647,7 @@ ram_size_loop	move.w	d0,0(a0,d3)
 ram_end
 		ifd	DEBUG
 		move.l	d3,d0
+		add.l	a0,d0
 		DMSG	<'Receive buffer end (end of card RAM) = $%lx',LF>
 		endc
 
@@ -2312,7 +2331,8 @@ receive_packet	moveq	#0,d0
 		moveq	#0,d0
 		move.b	du_NextPkt(a3),d0
 		lsl.w	#8,d0
-		add.w	d0,a4
+		move.l	du_BoardAddr(a3),a4	; added by JM 940217 (found by TR)
+		add.l	d0,a4			; changed to add.l by JM 940217
 
 		ifd	DEBUG
 		move.l	a4,d0
@@ -2484,10 +2504,11 @@ rec_wrap
 rec_copy2_loop	move.l	(a0)+,(a1)+
 rec_copy2_entry	dbf	d0,rec_copy2_loop
 
+		moveq	#0,d0
 		move.b	du_PStart(a3),d0
 		lsl.w	#8,d0
 		move.l	du_BoardAddr(a3),a0
-		add.w	d0,a0
+		add.l	d0,a0			; changed to add.l by JM 940217
 
 		ifd	DEBUG
 		move.l	a0,d0
@@ -2651,7 +2672,7 @@ next_packet	move.w	(a4),d0
 		move.b	d0,du_NextPkt(a3)
 		subq.b	#1,d0
 		cmp.b	du_PStart(a3),d0
-		bge.b	1$
+		bcc.b	1$			; was bge (fix by JM 940217)
 		move.b	du_PStop(a3),d0
 		subq.b	#1,d0
 1$		move.l	du_BoardAddr1(a3),a4
