@@ -64,6 +64,9 @@
 ;	  (previously there was a possibility that interrupt server
 ;	  could be left in free memory...)
 ;
+; 1.27	- Modified card memory check routine. Now should be more reliable.
+;
+;
 
 ;
 ; if DEBUG is defined, the device writes a lot of debugging
@@ -129,7 +132,7 @@ NIC_Delay	macro
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	26
+DEV_REVISION	equ	27
 
 ;
 ; start of the first hunk of the device file
@@ -604,16 +607,20 @@ found_board	move.l	d0,a2
 ;
 		moveq	#0,d3
 		move.l	cd_BoardAddr(a2),a0
-		move.l	#$5555aaaa,d0
+		move.l	#$5555,d0
+		move.l	#$aaaa,d1
 
-ram_size_loop	move.l	d0,0(a0,d3)
+ram_size_loop	move.w	d0,0(a0,d3)
+		move.w	d1,2(a0,d3)
 		NIC_Delay
-		cmp.l	0(a0,d3),d0
+		NIC_Delay
+		cmp.w	0(a0,d3),d0
+		bne.b	ram_end
+		cmp.w	2(a0,d3),d1
 		bne.b	ram_end
 		add.w	#$100,d3
 		cmp.w	#$ff00,d3
 		bcs.b	ram_size_loop
-		bra	ram_error
 
 ram_end
 		ifd	DEBUG
@@ -706,6 +713,10 @@ init_unit_exit
 		rts
 
 ram_error
+		ifd	DEBUG
+		DMSG	<'Board RAM test failed',LF>
+		endc
+
 init_unit_alloc_fail
 		bset	#CDB_CONFIGME,cd_Flags(a2)
 		moveq	#0,d0
