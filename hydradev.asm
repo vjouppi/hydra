@@ -104,11 +104,18 @@
 ;
 ; 1.42 -- fixed orphan packet/normal packet handling interaction
 ;
+; 1.43 -- trying to debug problems with Enlan-DFS ...
+;	  (and found a bug in Enlan...)
+;
+; 1.44 -- now uses Enqueue to queue iorequests (uses priority)
+;
+;
 
 
 ;
 ; if DEBUG is defined, the device writes a lot of debugging
 ; info to the serial port (with RawPutChar())
+;
 ;
 ;DEBUG		set	1
 
@@ -171,7 +178,7 @@ NIC_Delay	macro
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	42
+DEV_REVISION	equ	44
 
 ;
 ; start of the first hunk of the device file
@@ -198,7 +205,7 @@ dev_idstring	dc.b	'hydradev '
 		StrNumber DEV_VERSION
 		dc.b	'.'
 		StrNumber DEV_REVISION
-		dc.b	' (23.10.94)',CR,LF,0
+		dc.b	' (01.06.95)',CR,LF,0
 
 copyright_msg	dc.b	'Copyright © 1992-1994 by JMP-Electronics / Bits & Chips, Finland',CR,LF,0
 
@@ -564,6 +571,10 @@ InitBuffManagement
 		tst.l	d0
 		beq	initbuffm_exit
 		move.l	d0,a3
+
+		ifd	DEBUG
+		DMSG	<'Allocated magic cookie at $%lx',LF>
+		endc
 
 		lea	DummyCopy(pc),a0
 		move.l	a0,cookie_CopyToBuff(a3)
@@ -1322,7 +1333,10 @@ typestat_found	lea	ttn_Stat(a1),a0
 ;
 dev_AddMultiCast
 		ifd	DEBUG
-		DMSG	<'S2_ADDMULTICASTADDRESS',LF>
+		move.l	IOS2_SRCADDR(a2),d0
+		moveq	#0,d1
+		move.w	IOS2_SRCADDR+4(a2),d1
+		DMSG	<'S2_ADDMULTICASTADDRESS (%08lx%04lx)',LF>
 		endc
 
 		btst	#UNITB_CONFIGURED,UNIT_FLAGS(a3)
@@ -1436,7 +1450,10 @@ out_of_memory	lib	Exec,Permit
 ;
 dev_DelMultiCast
 		ifd	DEBUG
-		DMSG	<'S2_DELMULTICASTADDRESS',LF>
+		move.l	IOS2_SRCADDR(a2),d0
+		moveq	#0,d1
+		move.w	IOS2_SRCADDR+4(a2),d1
+		DMSG	<'S2_DELMULTICASTADDRESS (%08lx%04lx)',LF>
 		endc
 
 		btst	#UNITB_CONFIGURED,UNIT_FLAGS(a3)
@@ -2045,7 +2062,7 @@ do_write	btst	#UNITB_CONFIGURED,UNIT_FLAGS(a3)
 queue_write	bset	#IOB_QUEUED,IO_FLAGS(a2)
 		lea	du_TxQueue(a3),a0
 		move.l	a2,a1
-		lib	AddHead
+		lib	Enqueue		;was AddHead
 		lib	Enable
 
 		ifd	DEBUG
@@ -2082,7 +2099,8 @@ mtu_exceeded	move.l	#S2EVENT_ERROR!S2EVENT_TX!S2EVENT_SOFTWARE,d0
 ;
 dev_Read
 		ifd	DEBUG
-		DMSG	<'CMD_READ',LF>
+		move.l	IOS2_PACKETTYPE(a2),d0
+		DMSG	<'CMD_READ (packet type = $%04lx)',LF>
 		endc
 
 		btst	#UNITB_CONFIGURED,UNIT_FLAGS(a3)
@@ -2099,8 +2117,9 @@ dev_Read
 		move.l	IOS2_BUFFERMANAGEMENT(a2),a0
 		lea	cookie_RxQueue(a0),a0
 		move.l	a2,a1
-		lib	AddHead
+		lib	Enqueue		;was AddHead
 		lib	Enable
+
 		move.l	(sp)+,a6
 		rts
 
@@ -2552,17 +2571,31 @@ find_ieee802_next
 ; same packet type as the received packet
 ;
 find_ethernet_ioreq
+		ifd	DEBUG
+		DMSG	<'find_ethernet_ioreq',LF>
+		endc
+
 		move.l	du_CookieList+MLH_HEAD(a3),a5
 
 find_rec_ioreq_cookie_loop
 		tst.l	(a5)
 		beq	rec_done
 
+		ifd	DEBUG
+		move.l	a5,d0
+		DMSG	<'find_ethernet_ioreq_cookie_loop ($%lx)',LF>
+		endc
+
 		move.l	cookie_RxQueue+MLH_HEAD(a5),a2
 
 find_rec_ioreq_loop
 		tst.l	(a2)
 		beq	find_rec_ioreq_cookie_next
+
+		ifd	DEBUG
+		move.l	a2,d0
+		DMSG	<'find_ethernet_ioreq_loop ($%lx)',LF>
+		endc
 
 		cmp.w	IOS2_PACKETTYPE+2(a2),d3
 		bne.b	find_rec_ioreq_next
@@ -2596,14 +2629,14 @@ get_rec_packet2	bsr	ReturnRecIOReq
 
 find_rec_ioreq_cookie_next
 		move.l	(a5),a5	
-		bra.b	find_rec_ioreq_cookie_loop
+		bra	find_rec_ioreq_cookie_loop
 
 find_rec_ioreq_next
 		move.l	(a2),a2
-		bra.b	find_rec_ioreq_loop
+		bra	find_rec_ioreq_loop
 
 rec_done	tst.w	d4
-		bmi.b	next_packet
+		bmi	next_packet
 
 ;
 ; handle orphan packets here
@@ -2768,7 +2801,7 @@ term_tx		move.l	du_CurrentTxReq(a3),a2
 		bsr	TermIO
 
 		lea	du_TxQueue(a3),a0
-		lib	Exec,RemTail
+		lib	Exec,RemHead		;was RemTail
 		move.l	d0,du_CurrentTxReq(a3)
 		beq	nic_int_ok
 
