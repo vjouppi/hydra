@@ -67,6 +67,10 @@
 ; 1.27	- Modified card memory check routine. Now should be more reliable.
 ;
 ;
+; 1.28  - testing... more NIC_Delays and memory copy as words
+;
+; 1.29  - fixed queued transmit. changed copy routines to copy longwords again.
+;
 
 ;
 ; if DEBUG is defined, the device writes a lot of debugging
@@ -132,7 +136,7 @@ NIC_Delay	macro
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	27
+DEV_REVISION	equ	29
 
 ;
 ; start of the first hunk of the device file
@@ -660,7 +664,7 @@ ram_end
 		move.b	#0,NIC_IMR(a0)			; disable interrupts
 		NIC_Delay
 		move.b	#$ff,NIC_ISR(a0)		; clear interrupts
-
+		NIC_Delay
 ;
 ; read default ethernet address from board PROM
 ;
@@ -2206,6 +2210,7 @@ tx_copy_loop1	dbf	d1,tx_copy_loop
 		NIC_Delay
 ; send packet
 		move.b	#CRF_NODMA!CRF_TRANSMIT!CRF_START,NIC_CR(a0)
+		NIC_Delay
 		rts
 
 tx_buffm_error	clr.l	du_CurrentTxReq(a3)	;(not really necessary)
@@ -2242,6 +2247,7 @@ ReadTallyCounters
 
 		move.b	NIC_CNTR2(a0),d0
 		add.l	d0,du_Cntr2(a3)
+		NIC_Delay
 
 		lib	Enable
 		move.l	(sp)+,a6
@@ -2282,6 +2288,7 @@ NIC_IntRoutine	movem.l	d2/a2/a3/a4/a6,-(sp)
 		beq	nic_int_ok
 
 		move.b	#ISRF_CNT,NIC_ISR(a4)
+		NIC_Delay
 
 		bsr	ReadTallyCounters
 
@@ -2298,6 +2305,7 @@ receive_packet	moveq	#0,d0
 		move.b	NIC_CURR(a4),d1
 		NIC_Delay
 		move.b	#CRF_NODMA!CRF_START,NIC_CR(a4)			;page 0
+	 	NIC_Delay
 		cmp.b	d0,d1
 		beq	nic_int_ok
 
@@ -2446,7 +2454,7 @@ copy_rec_packet
 		lea	du_RxBuff(a3),a1
 		move.w	d2,d0		;packet length
 		addq.w	#3,d0
-		lsr.w	#2,d0
+		lsr.w	#2,d0	;number of longwords
 
 		ifd	DEBUG
 		DMSG	<'Receive copy1 length = $%lx longwords',LF>
@@ -2669,6 +2677,7 @@ receive_err
 
 		addq.l	#1,du_BadPackets(a3)
 		move.b	#ISRF_RXE,NIC_ISR(a4)
+		NIC_Delay
 
 		moveq	#S2EVENT_ERROR!S2EVENT_RX!S2EVENT_HARDWARE,d0
 		bsr	DoEvent
@@ -2749,6 +2758,7 @@ term_tx		move.l	du_CurrentTxReq(a3),a2
 		DMSG	<'Send from TxQueue',LF>
 		endc
 
+		bset	#UNITB_CURRENTTX,UNIT_FLAGS(a3)
 		bsr	ActualSendPacket
 		bra	nic_int_ok
 
@@ -2830,7 +2840,7 @@ recb1		move.b	#TCRF_LB1,NIC_TCR(a4)		; loopback mode
 ; retransmit the current packet
 ;
 		move.b	#CRF_NODMA!CRF_TRANSMIT!CRF_START,NIC_CR(a4)
-
+		NIC_Delay
 overflow_ok	move.l	#S2EVENT_ERROR!S2EVENT_RX!S2EVENT_HARDWARE,d0
 		bsr	DoEvent
 ;
