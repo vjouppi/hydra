@@ -4,7 +4,7 @@
 ;*
 ;;;;copy hydradev devs:networks/hydra.device
 ;
-; hydradev.a  --  sanaII device driver for Hydra Systems ethetnet card
+; hydradev.a  --  sanaII device driver for Hydra Systems ethernet card
 ;
 ; Timo Rossi, 1992
 ;
@@ -88,6 +88,8 @@
 ;	  callback routines)
 ;
 ; 1.35 -- trying to add PacketFilter support...
+; 1.36 -- trying to add multiple read queues
+; 1.37 -- fixed device name
 ;
 ; if DEBUG is defined, the device writes a lot of debugging
 ; info to the serial port (with RawPutChar())
@@ -153,7 +155,7 @@ NIC_Delay	macro
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	35
+DEV_REVISION	equ	37
 
 ;
 ; start of the first hunk of the device file
@@ -328,16 +330,22 @@ excl_ok2	move.l	IOS2_BUFFERMANAGEMENT(a2),a1
 		bsr	InitBuffManagement
 		move.l	d0,IOS2_BUFFERMANAGEMENT(a2)
 		beq	open_fail
+		move.l	a6,-(sp)
+		move.l	dev_SysBase(a6),a6
+		move.l	d0,a1
+		lea	du_CookieList(a3),a0
+		lib	AddHead
+		move.l	(sp)+,a6
 
 		btst	#SANA2OPB_PROM,d3
 		beq.b	open_ok1
 ;
 ; open in promiscuous mode
-; use buffm_Flags so we remember to decrement PromCount in close
+; use cookie_Flags so we remember to decrement PromCount in close
 ;
 		addq.w	#1,du_PromCount(a3)
 		move.l	IOS2_BUFFERMANAGEMENT(a2),a0
-		bset	#BFMB_PROM,buffm_Flags(a0)
+		bset	#BFMB_PROM,cookie_Flags(a0)
 		move.l	du_BoardAddr1(a3),a0
 		move.b	#RCRF_PRO!RCRF_AB!RCRF_AM,NIC_RCR(a0)
 
@@ -400,14 +408,19 @@ dev_Close	movem.l	a2/a3,-(sp)
 		move.l	d0,IO_DEVICE(a2)
 		move.l	d0,IO_UNIT(a2)
 
+		move.l	a6,-(sp)
+		move.l	dev_SysBase(a6),a6
 		move.l	IOS2_BUFFERMANAGEMENT(a2),a1
-		moveq	#buffm_Sizeof,d0
-		lib	Exec,FreeMem
+		lib	Remove
+		move.l	IOS2_BUFFERMANAGEMENT(a2),a1
+		moveq	#cookie_Sizeof,d0
+		lib	FreeMem
+		move.l	(sp)+,a6
 
 		subq.w	#1,UNIT_OPENCNT(a3)
 
 		move.l	IOS2_BUFFERMANAGEMENT(a2),a0
-		btst	#BFMB_PROM,buffm_Flags(a0)
+		btst	#BFMB_PROM,cookie_Flags(a0)
 		beq.b	close_1
 
 		subq.w	#1,du_PromCount(a3)
@@ -516,7 +529,7 @@ InitBuffManagement
 		DMSG	<'InitBuffManagement entry, taglist = $%lx',LF>
 		endc
 
-		moveq	#buffm_Sizeof,d0
+		moveq	#cookie_Sizeof,d0
 		move.l	#MEMF_PUBLIC!MEMF_CLEAR,d1
 		lib	Exec,AllocMem
 		tst.l	d0
@@ -524,8 +537,8 @@ InitBuffManagement
 		move.l	d0,a3
 
 		lea	DummyCopy(pc),a0
-		move.l	a0,buffm_CopyToBuff(a3)
-		move.l	a0,buffm_CopyFromBuff(a3)
+		move.l	a0,cookie_CopyToBuff(a3)
+		move.l	a0,cookie_CopyFromBuff(a3)
 
 		move.l	a2,d0
 		beq.b	initbuffm_ok
@@ -535,17 +548,17 @@ buffm_tag_loop	move.l	(a2)+,d0
 
 		cmp.l	#S2_COPYTOBUFF,d0
 		bne.b	1$
-		move.l	(a2)+,buffm_CopyToBuff(a3)
+		move.l	(a2)+,cookie_CopyToBuff(a3)
 		bra.b	buffm_tag_loop
 
 1$		cmp.l	#S2_COPYFROMBUFF,d0
 		bne.b	2$
-		move.l	(a2)+,buffm_CopyFromBuff(a3)
+		move.l	(a2)+,cookie_CopyFromBuff(a3)
 		bra.b	buffm_tag_loop
 
 2$		cmp.l	#S2_PACKETFILTER,d0
 		bne.b	21$
-		move.l	(a2)+,buffm_PacketFilter(a3)
+		move.l	(a2)+,cookie_PacketFilter(a3)
 		bra.b	buffm_tag_loop
 
 21$		subq.l	#TAG_IGNORE,d0
@@ -567,10 +580,15 @@ buffm_tag_loop	move.l	(a2)+,d0
 
 initbuffm_ok
 		ifd	DEBUG
-		move.l	buffm_CopyFromBuff(a3),d0
-		move.l	buffm_CopyToBuff(a3),d1
+		move.l	cookie_CopyFromBuff(a3),d0
+		move.l	cookie_CopyToBuff(a3),d1
 		DMSG	<'CopyFromBuff = $%lx, CopyToBuff = $%lx',LF>
+		move.l	cookie_PacketFilter(a3),d0
+		DMSG	<'PacketFilter hook = $%lx',LF>
 		endc
+
+		lea	cookie_RxQueue(a3),a0
+		NEWLIST	a0
 
 		move.l	a3,d0
 
@@ -671,7 +689,8 @@ ram_end
 		beq	init_unit_alloc_fail
 
 		move.l	d0,a3
-		move.l	LN_NAME(a6),LN_NAME(a3)
+		lea	dev_name(pc),a0
+		move.l	a0,LN_NAME(a3)
 		move.b	#PA_IGNORE,MP_FLAGS(a3)	;the MsgPort in unit is not used
 		move.l	a6,du_DevicePtr(a3)
 		move.l	d2,du_UnitNum(a3)
@@ -719,7 +738,7 @@ get_def_addr_loop
 		lea	du_TxQueue(a3),a0
 		NEWLIST	a0
 
-		lea	du_RxQueue(a3),a0
+		lea	du_CookieList(a3),a0
 		NEWLIST	a0
 
 		lea	du_RxOrphanQueue(a3),a0
@@ -956,7 +975,7 @@ AbortIO_End	move.l	d2,d0
 ;
 ; This doesn't abort the currently active transmit, if there is one
 ;
-Abort_All	movem.l	d2/d3/a2/a6,-(sp)
+Abort_All	movem.l	d2/d3/a2/a4/a6,-(sp)
 		move.l	d0,d3
 
 		ifd	DEBUG
@@ -988,10 +1007,15 @@ all_tx_aborted
 		DMSG	<'Transmit requests aborted',LF>
 		endc
 
-		move.l	du_RxQueue+MLH_HEAD(a3),a2
+		move.l	du_CookieList+MLH_HEAD(a3),a4
 
-abort_rx_loop	move.l	(a2),d2
+abort_rx_cookie_loop
+		tst.l	(a4)		; check next node pointer
 		beq.b	all_rx_aborted
+		move.l	cookie_RxQueue+MLH_HEAD(a4),a2
+
+abort_rx_loop	move.l	(a2),d2		; check & get next node pointer
+		beq.b	abort_rx_cookie_next
 
 		bclr	#IOB_QUEUED,IO_FLAGS(a2)
 		move.b	#IOERR_ABORTED,IO_ERROR(a2)
@@ -1001,10 +1025,14 @@ abort_rx_loop	move.l	(a2),d2
 		move.l	d2,a2
 		bra.b	abort_rx_loop
 
-all_rx_aborted
-		lea	du_RxQueue(a3),a0
+abort_rx_cookie_next
+		lea	cookie_RxQueue(a4),a0
 		NEWLIST	a0
 
+		move.l	(a4),a4		; node = node->mln_Succ;
+		bra.b	abort_rx_cookie_loop
+
+all_rx_aborted
 		ifd	DEBUG
 		DMSG	<'Receive requests aborted',LF>
 		endc
@@ -1067,7 +1095,7 @@ abort_all_done
 		DMSG	<'Abort_All complete',LF>
 		endc
 
-		movem.l	(sp)+,d2/d3/a2/a6
+		movem.l	(sp)+,d2/d3/a2/a4/a6
 		rts
 
 ;
@@ -2038,7 +2066,8 @@ dev_Read
 		move.l	dev_SysBase(a6),a6
 		lib	Disable
 		bset	#IOB_QUEUED,IO_FLAGS(a2)
-		lea	du_RxQueue(a3),a0
+		move.l	IOS2_BUFFERMANAGEMENT(a2),a0
+		lea	cookie_RxQueue(a0),a0
 		move.l	a2,a1
 		lib	AddHead
 		lib	Enable
@@ -2181,7 +2210,7 @@ ActualSendPacket
 		lea	du_TxBuff+14(a3),a0
 		movem.l	d2-d7/a2-a6,-(sp)
 		move.l	IOS2_BUFFERMANAGEMENT(a2),a2
-		move.l	buffm_CopyFromBuff(a2),a2
+		move.l	cookie_CopyFromBuff(a2),a2
 		jsr	(a2)
 		movem.l	(sp)+,d2-d7/a2-a6
 		tst.l	d0
@@ -2195,7 +2224,7 @@ raw_packet	move.l	IOS2_DATALENGTH(a2),d0
 		lea	du_TxBuff(a3),a0
 		movem.l	d2-d7/a2-a6,-(sp)
 		move.l	IOS2_BUFFERMANAGEMENT(a2),a2
-		move.l	buffm_CopyFromBuff(a2),a2
+		move.l	cookie_CopyFromBuff(a2),a2
 		jsr	(a2)
 		movem.l	(sp)+,d2-d7/a2-a6
 		tst.l	d0
@@ -2285,7 +2314,7 @@ ReadTallyCounters
 ;
 ; IS_DATA is pointer to the device unit structure
 ;
-NIC_IntRoutine	movem.l	d2/d3/d4/a2/a3/a4/a6,-(sp)
+NIC_IntRoutine	movem.l	d2/d3/d4/a2/a3/a4/a5/a6,-(sp)
 		move.l	a1,a3
 		move.l	du_DevicePtr(a3),a6
 		move.l	du_BoardAddr1(a3),a4
@@ -2436,10 +2465,18 @@ get_packet_type
 ; IEEE802.3 packet
 ;
 		move.w	#1500,d3
-		move.l	du_RxQueue+MLH_HEAD(a3),a2
+		move.l	du_CookieList+MLH_HEAD(a3),a5
+
+find_ieee802_cookie_loop
+		tst.l	(a5)
+		beq	orphan_packet
+
+		move.l	cookie_RxQueue+MLH_HEAD(a5),a2
+
 find_ieee802_loop
 		tst.l	(a2)
-		beq	orphan_packet
+		beq	find_ieee802_cookie_next
+
 		cmp.w	IOS2_PACKETTYPE+2(a2),d3
 		bcs.b	find_ieee802_next
 
@@ -2448,8 +2485,7 @@ find_ieee802_loop
 		bsr	CopyRecPacket
 		moveq	#1,d4		;set packet copied-flag
 
-1$		move.l	IOS2_BUFFERMANAGEMENT(a2),a0
-		move.l	buffm_PacketFilter(a0),d0
+1$		move.l	cookie_PacketFilter(a5),d0
 		beq	get_rec_packet
 		move.l	d0,a0
 ;
@@ -2469,12 +2505,26 @@ find_ieee802_loop
 		tst.l	d0
 		bne.b	get_rec_packet
 
+find_ieee802_cookie_next
+		move.l	(a5),a5
+		bra.b	find_ieee802_cookie_loop
+
 find_ieee802_next
 		move.l	(a2),a2
 		bra.b	find_ieee802_loop
 
+;
+; Try to find a 'normal' ethernet iorequest with the
+; same packet type as the received packet
+;
 find_ethernet_ioreq
-		move.l	du_RxQueue+MLH_HEAD(a3),a2
+		move.l	du_CookieList+MLH_HEAD(a3),a5
+
+find_rec_ioreq_cookie_loop
+		tst.l	(a5)
+		beq	orphan_packet
+
+		move.l	cookie_RxQueue+MLH_HEAD(a5),a2
 
 find_rec_ioreq_loop
 		tst.l	(a2)
@@ -2487,7 +2537,7 @@ find_rec_ioreq_loop
 		moveq	#1,d4		;set packet copied-flag
 
 1$		move.l	IOS2_BUFFERMANAGEMENT(a2),a0
-		move.l	buffm_PacketFilter(a0),d0
+		move.l	cookie_PacketFilter(a0),d0
 		beq.b	get_rec_packet
 		move.l	d0,a0
 ;
@@ -2506,6 +2556,10 @@ find_rec_ioreq_loop
 		movem.l	(sp)+,d2-d7/a2-a6
 		tst.l	d0
 		bne.b	get_rec_packet
+
+find_rec_ioreq_cookie_next
+		move.l	(a5),a5	
+		bra.b	find_rec_ioreq_cookie_loop
 
 find_rec_ioreq_next
 		move.l	(a2),a2
@@ -2549,7 +2603,7 @@ get_rec_packet
 		move.l	IOS2_DATA(a2),a0
 		movem.l	d2-d7/a2-a6,-(sp)
 		move.l	IOS2_BUFFERMANAGEMENT(a2),a2
-		move.l	buffm_CopyToBuff(a2),a2
+		move.l	cookie_CopyToBuff(a2),a2
 		jsr	(a2)
 		movem.l	(sp)+,d2-d7/a2-a6
 		tst.l	d0
@@ -2859,7 +2913,7 @@ nic_int_ok	moveq	#1,d0
 nic_int_continue
 		moveq	#0,d0
 
-nic_int_end	movem.l	(sp)+,d2/d3/d4/a2/a3/a4/a6
+nic_int_end	movem.l	(sp)+,d2/d3/d4/a2/a3/a4/a5/a6
 		rts
 
 ;
