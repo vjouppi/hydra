@@ -1,3 +1,8 @@
+;+asm
+;add module "hash.o"
+;do
+;copy hydradev devs:networks/hydra.device
+;*
 ;
 ; hydradev.a  --  sanaII device driver for Hydra Systems ethetnet card
 ;
@@ -47,6 +52,9 @@
 ;
 ; 1.20  - NIC access delays done with a macro
 ;
+; 1.22  - FIFO treshold lowered from 8+2 to 4+2 words by jm
+; 1.23  - Copyright message changed.
+;
 ;
 
 ;
@@ -72,17 +80,17 @@
 		include	'hardware/intbits.i'
 		include	'hardware/cia.i'
 
-		include	'offsets.i'
+		include	'include/offsets.i'
 
 		include	'devices/sana2.i'
 		include	'devices/sana2specialstats.i'
 
 		list
 
-		include	'hydraboard.i'
-		include	'hydradev.i'
+		include	'include/hydraboard.i'
+		include	'include/hydradev.i'
 
-		include	'macros.i'
+		include	'include/macros.i'
 ;
 Ciaa		equ	$bfe001
 ;
@@ -110,10 +118,11 @@ NIC_Delay	macro
 
 ;
 		xref	multicast_hash		;exported from hash.a
+		xref	_LVOFindConfigDev
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	20
+DEV_REVISION	equ	23
 
 ;
 ; start of the first hunk of the device file
@@ -140,9 +149,9 @@ dev_idstring	dc.b	'hydradev '
 		StrNumber DEV_VERSION
 		dc.b	'.'
 		StrNumber DEV_REVISION
-		dc.b	' (28.1.93)',CR,LF,0
+		dc.b	' (31.03.93)',CR,LF,0
 
-copyright_msg	dc.b	'Copyright © 1992 by Bits & Chips Oy, Finland',CR,LF,0
+copyright_msg	dc.b	'Copyright © 1992,1993 by JMP-Electronics, Finland',CR,LF,0
 
 expansion_name	dc.b	'expansion.library',0
 intuition_name	dc.b	'intuition.library',0
@@ -1741,7 +1750,8 @@ dev_ConfigInterface
 		NIC_Delay
 
 ; fifo thres. 8, 68k byteorder, word-wide DMA
-		move.b	#DCRF_FT1!DCRF_LS!DCRF_BOS!DCRF_WTS,NIC_DCR(a0)
+;		move.b	#DCRF_FT1!DCRF_LS!DCRF_BOS!DCRF_WTS,NIC_DCR(a0)
+		move.b	#DCRF_FT0!DCRF_LS!DCRF_BOS!DCRF_WTS,NIC_DCR(a0)
 		NIC_Delay
 
 		moveq	#0,d0
@@ -1984,9 +1994,6 @@ dev_Read
 		move.l	(sp)+,a6
 		rts
 
-;
-; these command are not yet implemented
-;
 dev_ReadOrphan
 		ifd	DEBUG
 		DMSG	<'S2_READORPHAN',LF>

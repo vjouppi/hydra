@@ -1,0 +1,83 @@
+From root Wed Mar 31 14:31:36 1993
+Received: from tukki.jyu.fi by messi.uku.fi (AIX 3.2/UCB 5.64/4.03)
+          id AA32556; Wed, 31 Mar 1993 14:31:35 +0300
+Received: by tukki.jyu.fi id AA06558
+  (5.65c8/IDA-1.4.4 for jmarin@messi.uku.fi); Wed, 31 Mar 1993 14:31:34 +0300
+From: Timo Rossi <trossi@jyu.fi>
+Message-Id: <199303311131.AA06558@tukki.jyu.fi>
+Subject: hydradev.readme
+To: jmarin@messi.uku.fi (Jukka Marin)
+Date: Wed, 31 Mar 93 14:29:00 EET DST
+X-Mailer: ELM [version 2.3 PL11]
+X-Charset: ISO_8859-1
+X-Char-Esc: 29
+Status: RO
+
+T{ss{ olisi jonkinlaine readme-file hydra.devicelle. kommetoi
+jos l|yd{t virheit{/puutteita/etc.
+
+(muuten, devicen sourcesta l|ytyi unohtunut kommentti, siin{
+lukee ett{ 'these commands are not yet implemented, ja per{ss{ tulee
+sitten ko. komentojen alirutiinit...voisit varmaan poistaa
+tuon siit{ versiosta jota olet itse editoinut)
+
+---- alkaa t{st{ ----
+Some comments about the Sana2-driver for Hydra ethernet cards.
+
+  - The name of the device is 'hydra.device'. Unit 0 is the first
+    Hydra ethernet card in the machine, unit 1 is second, unit 2 is third etc.
+
+  - The device clears the CONFIGME-flag in the ConfigDev-structure of
+    the ethernet card when it is opened the first time. It sets the
+    flag back when it is flushed from memory. It refuses to open
+    if the CONFIGME-flag is clear.
+
+  - The device has only been tested with cards with 16k RAM. It has some
+    ram size detecting code, but it doesn't currently properly
+    support 64k RAM (this will be fixed, of course).
+
+  - DMA is not used.
+
+  - The device should work with Kickstart 1.2 or later (but most Sana2-
+    compatible software requires 2.0 or later. Also most other sana2-
+    devices probably use the utility.library functions for tag list handling,
+    so they need 2.0+ too)
+
+  - Promiscuous mode and exclusive access are supported.
+
+  - The device can be opened with the ios2_BufferManagement-field set
+    to NULL, if you don't need to use the actual packet send/receive
+    functions (a dummy copy routine that does nothing is used in that case)
+
+  - S2_CONFIGINTERFACE-command allows setting the address to any valid
+    ethernet address (this is a little different from the Sana2-standard
+    that says that ethernet cards should only be configured to the
+    default (ROM) address).
+
+  - S2_READORPHAN-command sets the packet type field of the IORequest
+    to the type of the received packet. This is sometimes useful,
+    but nonstandard.
+
+  - Special stats include bad multicast hash filtering and packet collisition
+    count (but the collision stats don't seem to work properly, this
+    will be fixed)
+
+  - CMD_WRITE allows multicast/broadcast packets. Commodore's a2065.device
+    also does this.
+
+  - Global stats 'Overruns' counts receive buffer ring overflows.
+
+  - The device supports all standard SANA2 commands.
+	CMD_READ, CMD_WRITE, CMD_FLUSH, S2_DEVICEQUERY, S2_GETSTATIONADDRESS,
+	S2_CONFIGINTERFACE, S2_ADDMULTICASTADDRESS, S2_DELMULTICASTADDRESS,
+	S2_MULTICAST, S2_BROADCAST, S2_TRACKTYPE, S2_UNTRACKTYPE,
+	S2_GETTYPESTATS, S2_GETSPECIALSTATS, S2_GETGLOBALSTATS,
+	S2_ONEVENT, S2_READORPHAN, S2_ONLINE, S2_OFFLINE
+
+
+    -- Timo Rossi
+
+
+-- 
+<< Timo Rossi  --  email: trossi@jyu.fi >>
+
