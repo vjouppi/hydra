@@ -22,7 +22,6 @@
 ;
 
 ;
-; type stats are not implemented yet.
 ; not all global stats are properly updated.
 ;
 ; 1.9 -- 1992-11-27
@@ -33,7 +32,8 @@
 ; 1.11	- fixed AbortIO()
 ;	- added S2_ONEVENT and event handling
 ;	- fixed expunge
-; 1.12	- ...
+; 1.13	- added type tracking
+; 1.14
 ;
 
 ;
@@ -91,7 +91,7 @@ Ciaa		equ	$bfe001
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	12
+DEV_REVISION	equ	14
 
 ;
 ; start of the first hunk of the device file
@@ -634,6 +634,9 @@ get_def_addr_loop
 		lea	du_MultiCastList(a3),a0
 		NEWLIST	a0
 
+		lea	du_TypeTrackList(a3),a0
+		NEWLIST	a0
+
 init_unit_ok	move.l	a3,d0
 
 init_unit_exit
@@ -658,7 +661,7 @@ init_unit_alloc_fail
 ; Return:
 ;  nothing
 ;
-Expunge_Unit	movem.l	a3/a6,-(sp)
+Expunge_Unit	movem.l	d2/a2/a3/a6,-(sp)
 		move.l	dev_SysBase(a6),a6
 
 		ifd	DEBUG
@@ -680,7 +683,43 @@ Expunge_Unit	movem.l	a3/a6,-(sp)
 		moveq	#INTB_PORTS,d0
 		lib	RemIntServer
 
-exp_unit_1	move.l	a3,a1
+exp_unit_1
+;
+; free all multicast addresses that are in use when the unit is expunged
+;
+		move.l	du_MultiCastList(a3),a2
+
+exp_mca_loop	move.l	(a2),d2
+		beq.b	exp_mca_done
+
+		move.l	a2,a1
+		move.l	#mca_Sizeof,d0
+		lib	FreeMem
+
+		move.l	d2,a2
+		bra.b	exp_mca_loop
+
+exp_mca_done
+;
+; free all type tracking nodes that are still here
+;
+		move.l	du_TypeTrackList(a3),a2
+
+exp_tt_loop	move.l	(a2),d2
+		beq.b	exp_tt_done
+
+		move.l	a2,a1
+		move.l	#ttn_Sizeof,d0
+		lib	FreeMem
+
+		move.l	d2,a2
+		bra.b	exp_tt_loop
+
+exp_tt_done
+;
+; and free the unit structure itself
+;
+		move.l	a3,a1
 		move.l	du_ConfigDev(a3),a3
 		move.l	#du_Sizeof,d0
 		lib	FreeMem
@@ -688,7 +727,7 @@ exp_unit_1	move.l	a3,a1
 ; allow re-configuration of the board
 ;
 		bset	#CDB_CONFIGME,cd_Flags(a3)
-		movem.l	(sp)+,a3/a6
+		movem.l	(sp)+,d2/a2/a3/a6
 		rts
 ;
 ; BeginIO routine
@@ -953,15 +992,168 @@ dev_CmdTable	dev_cmd	invalid_cmd		;CMD_INVALID
 		dev_cmd	dev_DelMultiCast	;S2_DELMULTICASTADDRESS
 		dev_cmd	dev_Multicast		;S2_MULTICAST
 		dev_cmd	dev_Broadcast		;S2_BROADCAST
-		dev_cmd	invalid_cmd		;S2_TRACKTYPE	  (not
-		dev_cmd	invalid_cmd		;S2_UNTRACKTYPE   implemented
-		dev_cmd	invalid_cmd		;S2_GETTYPESTATS  yet)
+		dev_cmd	dev_TrackType		;S2_TRACKTYPE
+		dev_cmd	dev_UnTrackType		;S2_UNTRACKTYPE
+		dev_cmd	dev_GetTypeStats	;S2_GETTYPESTATS
 		dev_cmd	dev_GetSpecialStats	;S2_GETSPECIALSTATS
 		dev_cmd	dev_GetGlobalStats	;S2_GETGLOBALSTATS
 		dev_cmd	dev_OnEvent		;S2_ONEVENT
 		dev_cmd	dev_ReadOrphan		;S2_READORPHAN
 		dev_cmd	dev_OnLine		;S2_ONLINE
 		dev_cmd	dev_OffLine		;S2_OFFLINE
+
+;
+; S2_TRACKTYPE
+;
+; IOS2_PACKETTYPE - type to be tracked
+;
+dev_TrackType
+		ifd	DEBUG
+		move.l	IOS2_PACKETTYPE(a2),d0
+		DMSG	<'IOS2_TRACKTYPE ($%lx)',LF>
+		endc
+
+		move.l	a6,-(sp)
+		move.l	dev_SysBase(a6),a6
+		lib	Forbid
+
+		move.l	du_TypeTrackList(a3),a1
+		move.w	IOS2_PACKETTYPE+2(a2),d0
+		cmp.w	#1500,d0
+		bhi.b	track_find_loop
+		moveq	#0,d0		;ieee802.3
+
+track_find_loop	move.l	(a1),d1
+		beq.b	track_find_end
+		cmp.w	ttn_Type(a1),d0
+		beq.b	already_tracked
+		move.l	d1,a1
+		bra.b	track_find_loop
+
+track_find_end	move.l	d0,-(sp)
+		move.l	#ttn_Sizeof,d0
+		move.l	#MEMF_CLEAR!MEMF_PUBLIC,d1
+		lib	AllocMem
+		move.l	(sp)+,d1
+		tst.l	d0
+		beq	track_alloc_fail
+		move.l	d0,a1
+
+		move.w	d1,ttn_Type(a1)
+
+		lib	Disable
+		lea	du_TypeTrackList(a3),a0
+		lib	AddTail
+		lib	Enable
+
+		lib	Permit
+		move.l	(sp)+,a6
+		bra	TermIO
+
+already_tracked	lib	Permit
+		move.l	(sp)+,a6
+		moveq	#S2ERR_BAD_STATE,d0
+		moveq	#S2WERR_ALREADY_TRACKED,d1
+		bra	IOError
+
+track_alloc_fail
+		lib	Permit
+		move.l	(sp)+,a6
+		move.l	#S2EVENT_SOFTWARE,d0
+		bsr	DoEvent
+		moveq	#S2ERR_NO_RESOURCES,d0
+		moveq	#0,d1
+		bra	IOError
+
+;
+; S2_UNTRACKTYPE
+;
+; IOS2_PACKETTYPE - type to be removed from tracking
+;
+dev_UnTrackType
+		ifd	DEBUG
+		move.l	IOS2_PACKETTYPE(a2),d0
+		DMSG	<'IOS2_UNTRACKTYPE ($%lx)',LF>
+		endc
+
+		move.l	a6,-(sp)
+		move.l	dev_SysBase(a6),a6
+		lib	Forbid
+
+		move.l	du_TypeTrackList(a3),a1
+		move.w	IOS2_PACKETTYPE+2(a2),d0
+		cmp.w	#1500,d0
+		bhi.b	untrack_find_loop
+		moveq	#0,d0		;ieee802.3
+
+untrack_find_loop
+		move.l	(a1),d1
+		beq.b	typetrack_not_found
+		cmp.w	ttn_Type(a1),d0
+		beq.b	untrack_found
+		move.l	d1,a1
+		bra.b	untrack_find_loop
+
+untrack_found	move.l	a1,-(sp)
+		lib	Disable
+		lib	Remove
+		lib	Enable
+		move.l	(sp)+,a1
+		move.l	#ttn_Sizeof,d0
+		lib	FreeMem
+
+		lib	Permit
+		move.l	(sp)+,a6
+		bra	TermIO
+
+typetrack_not_found
+		lib	Permit
+		move.l	(sp)+,a6
+		moveq	#S2ERR_BAD_STATE,d0
+		moveq	#S2WERR_NOT_TRACKED,d1
+		bra	IOError
+
+;
+; S2_GETTYPESTATS
+;
+; IOS2_PACKETTYPE - get statistics for this type
+; IOS2_STATDATA   - pointer to Sana2PacketTypeStats-structure
+;
+dev_GetTypeStats
+		ifd	DEBUG
+		move.l	IOS2_PACKETTYPE(a2),d0
+		DMSG	<'IOS2_GETTYPESTATS ($%lx)',LF>
+		endc
+
+		tst.l	IOS2_STATDATA(a2)
+		beq	null_pointer
+
+		move.l	a6,-(sp)
+		move.l	dev_SysBase(a6),a6
+		lib	Forbid
+
+		move.l	du_TypeTrackList(a3),a1
+		move.w	IOS2_PACKETTYPE+2(a2),d0
+		cmp.w	#1500,d0
+		bhi.b	typestat_find_loop
+		moveq	#0,d0		;ieee802.3
+
+typestat_find_loop
+		move.l	(a1),d1
+		beq	typetrack_not_found
+		cmp.w	ttn_Type(a1),d0
+		beq.b	typestat_found
+		move.l	d1,a1
+		bra.b	typestat_find_loop
+
+typestat_found	lea	ttn_Stat(a1),a0
+		move.l	IOS2_STATDATA(a2),a1
+		moveq	#S2PTS_SIZE,d0
+		lib	CopyMem
+
+		lib	Permit
+		move.l	(sp)+,a6
+		bra	TermIO
 
 ;
 ; S2_ADDMULTICASTADDRESS
@@ -1844,7 +2036,8 @@ raw_packet	move.l	IOS2_DATALENGTH(a2),d0
 
 		move.l	IOS2_DATALENGTH(a2),d0
 
-do_send_packet
+do_send_packet	move.l	d0,du_TxLength(a3)
+
 		ifd	DEBUG
 		DMSG	<'Actually send packet, length = %ld',LF>
 		endc
@@ -2176,16 +2369,45 @@ packet_copied
 		moveq	#S2EVENT_ERROR!S2EVENT_RX!S2EVENT_BUFF,d0
 		bsr	DoEvent
 
-4$		move.l	a2,a1
+4$
+;
+; type tracking for received packets
+;
+		move.l	du_TypeTrackList(a3),a1
+		move.w	du_RxBuff+12(a3),d0
+		cmp.w	#1500,d0
+		bhi.b	rec_track_find_loop
+		moveq	#0,d0		;ieee802.3
+
+rec_track_find_loop
+		move.l	(a1),d1
+		beq.b	rec_track_done
+		cmp.w	ttn_Type(a1),d0
+		beq.b	rec_track_found
+		move.l	d1,a1
+		bra.b	rec_track_find_loop
+
+rec_track_found
+		ifd	DEBUG
+		DMSG	<'Updating TrackType RX stats',LF>
+		endc
+
+		addq.l	#1,ttn_Stat+S2PTS_RXPACKETS(a1)
+		moveq	#0,d0
+		move.w	d2,d0
+		sub.w	#18,d0
+		add.l	d0,ttn_Stat+S2PTS_RXBYTES(a1)
+
+rec_track_done	move.l	a2,a1
 		lib	Exec,Remove
 		bsr	TermIO
 
 		addq.l	#1,du_PacketsReceived(a3)
-;
-; do type tracking here!!??
-;
 		bra	next_packet
 
+;
+; handle orphan packets here
+;
 orphan_packet
 		ifd	DEBUG
 		DMSG	<'Orphan packet',LF>
@@ -2198,13 +2420,37 @@ orphan_packet
 		ifd	DEBUG
 		DMSG	<'Packet dropped',LF>
 		endc
+;
+; do type tracking for orphan packets here
+; packet type is now in d0
+;
+		move.l	du_TypeTrackList(a3),a1
+		cmp.w	#1500,d0
+		bhi.b	orphan_track_find_loop
+		moveq	#0,d0		;ieee802.3
 
+orphan_track_find_loop
+		move.l	(a1),d1
+		beq.b	orphan_track_done
+		cmp.w	ttn_Type(a1),d0
+		beq.b	orphan_track_found
+		move.l	d1,a1
+		bra.b	orphan_track_find_loop
+
+orphan_track_found
+		ifd	DEBUG
+		DMSG	<'Incrementing TrackType packet drop count',LF>
+		endc
+
+		addq.l	#1,ttn_Stat+S2PTS_PACKETSDROPPED(a1)
+
+orphan_track_done
 		addq.l	#1,du_UnknownTypesReceived(a3)
 	;;;	bra.b	next_packet
 
-oversize_packet	;;;addq.l	#1,du_Overruns(a3)	;is this correct?
+oversize_packet	;;;addq.l	#1,du_Overruns(a3)
 		; increment the overrun counter only when there is
-		; a receive buffer ring overflow...
+		; a receive buffer ring overflow...not here...
 
 	;;	maybe add DoEvent(S2EVENT_RX) here...
 
@@ -2262,7 +2508,7 @@ transmit_ok	and.b	#%1010,d0
 ; Set IO_ERROR/WIREERROR if an error has been detected
 ; What is a good error number here??
 		btst	#3,d0
-		beq.b	1$
+		beq.b	tx_ok
 		move.l	du_CurrentTxReq(a3),a0
 		move.b	#S2ERR_NO_RESOURCES,IO_ERROR(a0)
 		clr.b	IOS2_WIREERROR(a0)
@@ -2270,15 +2516,37 @@ transmit_ok	and.b	#%1010,d0
 		moveq	#S2EVENT_ERROR!S2EVENT_TX,d0
 		bsr	DoEvent
 
-		bra.b	2$
+		bra.b	term_tx
 
-1$		addq.l	#1,du_PacketsSent(a3)
-
+tx_ok		addq.l	#1,du_PacketsSent(a3)
 ;
-; do type tracking here !!
+; do type tracking for transmitted packets
 ;
+		move.l	du_TypeTrackList(a3),a1
+		move.w	du_TxBuff+12(a3),d0
+		cmp.w	#1500,d0
+		bhi.b	tx_track_loop
+		moveq	#0,d0		;ieee802.3
 
-2$		move.l	du_CurrentTxReq(a3),a2
+tx_track_loop	move.l	(a1),d1
+		beq.b	term_tx
+		cmp.w	ttn_Type(a1),d0
+		beq.b	tx_track_found
+		move.l	d1,a1
+		bra.b	tx_track_loop
+
+tx_track_found
+		ifd	DEBUG
+		DMSG	<'Updating TrackType TX stats',LF>
+		endc
+
+		addq.l	#1,ttn_Stat+S2PTS_TXPACKETS(a1)
+		moveq	#14,d1
+		move.l	du_TxLength(a3),d0
+		sub.l	d1,d0
+		add.l	d0,ttn_Stat+S2PTS_TXBYTES(a1)
+
+term_tx		move.l	du_CurrentTxReq(a3),a2
 		bsr	TermIO
 
 		lea	du_TxQueue(a3),a0
