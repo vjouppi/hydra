@@ -60,6 +60,10 @@
 ; 1.25	- fixed dev_Open to work with non-zero units (not tested...)
 ;	- also fixed IOS2_DATALENGTH setting with received raw packets
 ;
+; 1.26	- Now interrupt server is added in S2_CONFIGINTERFACE.
+;	  (previously there was a possibility that interrupt server
+;	  could be left in free memory...)
+;
 
 ;
 ; if DEBUG is defined, the device writes a lot of debugging
@@ -125,7 +129,7 @@ NIC_Delay	macro
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	25
+DEV_REVISION	equ	26
 
 ;
 ; start of the first hunk of the device file
@@ -152,7 +156,7 @@ dev_idstring	dc.b	'hydradev '
 		StrNumber DEV_VERSION
 		dc.b	'.'
 		StrNumber DEV_REVISION
-		dc.b	' (31.03.93)',CR,LF,0
+		dc.b	' (18.04.93)',CR,LF,0
 
 copyright_msg	dc.b	'Copyright © 1992,1993 by JMP-Electronics, Finland',CR,LF,0
 
@@ -662,15 +666,7 @@ get_def_addr_loop
 		addq.l	#2,a0
 		dbf	d0,get_def_addr_loop
 
-		lea	du_NIC_Intr(a3),a1
-		move.l	LN_NAME(a6),LN_NAME(a1)
-		move.b	#NT_INTERRUPT,LN_TYPE(a1)
-		move.b	#20,LN_PRI(a1)
-		lea	NIC_IntRoutine(pc),a0
-		move.l	a0,IS_CODE(a1)
-		move.l	a3,IS_DATA(a1)
-		moveq	#INTB_PORTS,d0
-		lib	Exec,AddIntServer
+; (interrupt server is added in S2_CONFIGINTERFACE)
 
 ;
 ; initialize transmit page start/receive buffer start/end page variables
@@ -1749,8 +1745,7 @@ dev_ConfigInterface
 		move.b	#CRF_NODMA!CRF_STOP,NIC_CR(a0) ; page 0, reset NIC
 		NIC_Delay
 
-; fifo thres. 8, 68k byteorder, word-wide DMA
-;		move.b	#DCRF_FT1!DCRF_LS!DCRF_BOS!DCRF_WTS,NIC_DCR(a0)
+; fifo thres. 4 bytes, 68k byteorder, word-wide DMA
 		move.b	#DCRF_FT0!DCRF_LS!DCRF_BOS!DCRF_WTS,NIC_DCR(a0)
 		NIC_Delay
 
@@ -1774,13 +1769,26 @@ dev_ConfigInterface
 		NIC_Delay
 		move.b	du_PStop(a3),NIC_PSTOP(a0)
 		NIC_Delay
+;
+; Add interrupt server
+;
+		lea	du_NIC_Intr(a3),a1
+		move.l	LN_NAME(a6),LN_NAME(a1)
+		move.b	#NT_INTERRUPT,LN_TYPE(a1)
+		move.b	#20,LN_PRI(a1)
+		lea	NIC_IntRoutine(pc),a0
+		move.l	a0,IS_CODE(a1)
+		move.l	a3,IS_DATA(a1)
+		moveq	#INTB_PORTS,d0
+		lib	AddIntServer
 
+		move.l	du_BoardAddr1(a3),a0
 		move.b	#$ff,NIC_ISR(a0)	; clear interrupt status
 		NIC_Delay
 		move.b	#%00111111,NIC_IMR(a0)	; enable interrupts
 		NIC_Delay
 
-; select page 1
+; Select page 1
 		move.b	#CRF_PAGE0!CRF_NODMA!CRF_STOP,NIC_CR(a0)
 		NIC_Delay
 
