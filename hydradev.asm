@@ -94,6 +94,9 @@
 ;	  Fixed a bug in find_rec_ioreq_loop, it jumped to orphan_packet,
 ;	  where it should jump to find_rec_ioreq_cookie_next...
 ;
+; 1.39 -- fixing multiple read queues to work the way they should...
+;
+
 ;
 ; if DEBUG is defined, the device writes a lot of debugging
 ; info to the serial port (with RawPutChar())
@@ -159,7 +162,7 @@ NIC_Delay	macro
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	38
+DEV_REVISION	equ	39
 
 ;
 ; start of the first hunk of the device file
@@ -186,9 +189,9 @@ dev_idstring	dc.b	'hydradev '
 		StrNumber DEV_VERSION
 		dc.b	'.'
 		StrNumber DEV_REVISION
-		dc.b	' (01.04.94)',CR,LF,0
+		dc.b	' (05.08.94)',CR,LF,0
 
-copyright_msg	dc.b	'Copyright © 1992,1993,1994 by JMP-Electronics, Finland',CR,LF,0
+copyright_msg	dc.b	'Copyright © 1992,1993,1994 by JMP-Electronics / Bits & Chips, Finland',CR,LF,0
 
 expansion_name	dc.b	'expansion.library',0
 intuition_name	dc.b	'intuition.library',0
@@ -2500,7 +2503,7 @@ find_ieee802_loop
 		moveq	#1,d4		;set packet copied-flag
 
 1$		move.l	cookie_PacketFilter(a5),d0
-		beq	get_rec_packet
+		beq	get_rec_packet1
 		move.l	d0,a0
 ;
 ; call the packet filter hook
@@ -2517,7 +2520,9 @@ find_ieee802_loop
 		jsr	(a3)
 		movem.l	(sp)+,d2-d7/a2-a6
 		tst.l	d0
-		bne.b	get_rec_packet
+		beq.b	find_ieee802_next
+
+get_rec_packet1	bsr	ReturnRecIOReq
 
 find_ieee802_cookie_next
 		move.l	(a5),a5
@@ -2526,6 +2531,7 @@ find_ieee802_cookie_next
 find_ieee802_next
 		move.l	(a2),a2
 		bra.b	find_ieee802_loop
+
 
 ;
 ; Try to find a 'normal' ethernet iorequest with the
@@ -2553,7 +2559,7 @@ find_rec_ioreq_loop
 
 1$		move.l	IOS2_BUFFERMANAGEMENT(a2),a0
 		move.l	cookie_PacketFilter(a0),d0
-		beq.b	get_rec_packet
+		beq.b	get_rec_packet2
 		move.l	d0,a0
 ;
 ; call the packet filter hook
@@ -2570,7 +2576,9 @@ find_rec_ioreq_loop
 		jsr	(a3)
 		movem.l	(sp)+,d2-d7/a2-a6
 		tst.l	d0
-		bne.b	get_rec_packet
+		beq.b	find_rec_ioreq_next
+
+get_rec_packet2	bsr	ReturnRecIOReq
 
 find_rec_ioreq_cookie_next
 		move.l	(a5),a5	
@@ -2580,57 +2588,6 @@ find_rec_ioreq_next
 		move.l	(a2),a2
 		bra.b	find_rec_ioreq_loop
 
-get_rec_packet
-;
-; probably should move the boundary pointer here...
-;
-		moveq	#-1,d0
-		cmp.l	du_RxBuff(a3),d0
-		bne.b	1$
-		cmp.w	du_RxBuff+4(a3),d0
-		bne.b	1$
-		bset	#SANA2IOB_BCAST,IO_FLAGS(a2)
-1$		bra.b	2$
-
-		btst	#0,du_RxBuff(a3)
-		beq.b	2$
-		bset	#SANA2IOB_MCAST,IO_FLAGS(a2)
-2$
-		move.l	du_RxBuff(a3),IOS2_DSTADDR(a2)
-		move.w	du_RxBuff+4(a3),IOS2_DSTADDR+4(a2)
-		move.w	du_RxBuff+6(a3),IOS2_SRCADDR(a2)
-		move.l	du_RxBuff+8(a3),IOS2_SRCADDR+2(a2)
-		move.w	du_RxBuff+12(a3),IOS2_PACKETTYPE+2(a2)
-
-		moveq	#0,d0
-		move.w	d2,d0
-		sub.w	#18,d0
-		ext.l	d0
-		lea	du_RxBuff+14(a3),a1
-		
-		btst	#SANA2IOB_RAW,IO_FLAGS(a2)
-		beq.b	3$
-
-		move.w	d2,d0
-		sub.w	#14,a1
-
-3$		move.l	d0,IOS2_DATALENGTH(a2)
-		move.l	IOS2_DATA(a2),a0
-		movem.l	d2-d7/a2-a6,-(sp)
-		move.l	IOS2_BUFFERMANAGEMENT(a2),a2
-		move.l	cookie_CopyToBuff(a2),a2
-		jsr	(a2)
-		movem.l	(sp)+,d2-d7/a2-a6
-		tst.l	d0
-		bne.b	4$
-
-		move.b	#S2ERR_SOFTWARE,IO_ERROR(a2)
-		move.b	#S2WERR_BUFF_ERROR,IOS2_WIREERROR+3(a2)
-
-		moveq	#S2EVENT_ERROR!S2EVENT_RX!S2EVENT_BUFF,d0
-		bsr	DoEvent
-
-4$
 ;
 ; type tracking for received packets
 ;
@@ -2642,7 +2599,7 @@ get_rec_packet
 
 rec_track_find_loop
 		move.l	(a1),d1
-		beq.b	rec_track_done
+		beq.b	next_packet
 		cmp.w	ttn_Type(a1),d0
 		beq.b	rec_track_found
 		move.l	d1,a1
@@ -2658,10 +2615,9 @@ rec_track_found
 		move.w	d2,d0
 		sub.w	#18,d0
 		add.l	d0,ttn_Stat+S2PTS_RXBYTES(a1)
+		bra	next_packet
 
-rec_track_done	move.l	a2,a1
-		lib	Exec,Remove
-		bsr	TermIO
+get_rec_packet3	bsr	ReturnRecIOReq
 		bra	next_packet
 
 ;
@@ -2678,7 +2634,7 @@ orphan_packet
 
 1$		move.l	du_RxOrphanQueue+MLH_TAILPRED(a3),a2
 		tst.l	MLN_PRED(a2)
-		bne	get_rec_packet
+		bne	get_rec_packet3
 
 		ifd	DEBUG
 		DMSG	<'Packet dropped',LF>
@@ -3020,6 +2976,60 @@ rec_copy3_loop	move.l	(a0)+,(a1)+
 rec_copy3_entry	dbf	d0,rec_copy3_loop
 
 packet_copied	rts
+
+;
+; D2 - packet length
+; A2 - pointer to IORequest
+; A3 - pointer to unit structure
+;
+ReturnRecIOReq	moveq	#-1,d0
+		cmp.l	du_RxBuff(a3),d0
+		bne.b	1$
+		cmp.w	du_RxBuff+4(a3),d0
+		bne.b	1$
+		bset	#SANA2IOB_BCAST,IO_FLAGS(a2)
+1$		bra.b	2$
+
+		btst	#0,du_RxBuff(a3)
+		beq.b	2$
+		bset	#SANA2IOB_MCAST,IO_FLAGS(a2)
+2$
+		move.l	du_RxBuff(a3),IOS2_DSTADDR(a2)
+		move.w	du_RxBuff+4(a3),IOS2_DSTADDR+4(a2)
+		move.w	du_RxBuff+6(a3),IOS2_SRCADDR(a2)
+		move.l	du_RxBuff+8(a3),IOS2_SRCADDR+2(a2)
+		move.w	du_RxBuff+12(a3),IOS2_PACKETTYPE+2(a2)
+
+		moveq	#0,d0
+		move.w	d2,d0
+		sub.w	#18,d0
+		ext.l	d0
+		lea	du_RxBuff+14(a3),a1
+		
+		btst	#SANA2IOB_RAW,IO_FLAGS(a2)
+		beq.b	3$
+		move.w	d2,d0
+		sub.w	#14,a1
+
+3$		move.l	d0,IOS2_DATALENGTH(a2)
+		move.l	IOS2_DATA(a2),a0
+		movem.l	d2-d7/a2-a6,-(sp)
+		move.l	IOS2_BUFFERMANAGEMENT(a2),a2
+		move.l	cookie_CopyToBuff(a2),a2
+		jsr	(a2)
+		movem.l	(sp)+,d2-d7/a2-a6
+		tst.l	d0
+		bne.b	4$
+
+		move.b	#S2ERR_SOFTWARE,IO_ERROR(a2)
+		move.b	#S2WERR_BUFF_ERROR,IOS2_WIREERROR+3(a2)
+
+		moveq	#S2EVENT_ERROR!S2EVENT_RX!S2EVENT_BUFF,d0
+		bsr	DoEvent
+
+4$		move.l	a2,a1
+		lib	Exec,Remove
+		bra	TermIO
 
 ;;;;
 		ifd	DEBUG
