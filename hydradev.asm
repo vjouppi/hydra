@@ -55,6 +55,7 @@
 ; 1.22  - FIFO treshold lowered from 8+2 to 4+2 words by jm
 ; 1.23  - Copyright message changed.
 ;
+; 1.24	- fixed RAM test routine (still not perfect... no shadow checking)
 ;
 
 ;
@@ -118,11 +119,10 @@ NIC_Delay	macro
 
 ;
 		xref	multicast_hash		;exported from hash.a
-		xref	_LVOFindConfigDev
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	23
+DEV_REVISION	equ	24
 
 ;
 ; start of the first hunk of the device file
@@ -295,7 +295,7 @@ excl_ok1	btst	#UNITB_EXCLUSIVE,UNIT_FLAGS(a3)
 excl_ok2	move.l	IOS2_BUFFERMANAGEMENT(a2),a1
 		bsr	InitBuffManagement
 		move.l	d0,IOS2_BUFFERMANAGEMENT(a2)
-		beq.b	open_fail
+		beq	open_fail
 
 		btst	#SANA2OPB_PROM,d3
 		beq.b	open_ok1
@@ -596,18 +596,13 @@ found_board	move.l	d0,a2
 ;
 		moveq	#0,d3
 		move.l	cd_BoardAddr(a2),a0
-		add.l	#$8000,a0
-		move.w	#$5555,d0
-		move.w	#$aaaa,d1
+		move.l	#$5555aaaa,d0
 
-ram_size_loop	move.w	d0,0(a0,d3)
-		move.w	d1,2(a0,d3)
-		cmp.w	0(a0,d3),d0
-		bne.b	ram_end
-		cmp.w	2(a0,d3),d1
+ram_size_loop	move.l	d0,0(a0,d3)
+		cmp.l	0(a0,d3),d0
 		bne.b	ram_end
 		add.w	#$100,d3
-		cmp.w	#$7f00,d3
+		cmp.w	#$ff00,d3
 		bcs.b	ram_size_loop
 		bra	ram_error
 
@@ -1279,7 +1274,7 @@ dev_AddMultiCast
 		endc
 
 		cmp.w	#1,(a0)
-		bhi.b	add_multi_2
+		bhi	add_multi_2
 
 		move.w	mca_BitNum(a1),d0
 		move.w	d0,d1
@@ -2158,7 +2153,7 @@ do_send_packet	move.l	d0,du_TxLength(a3)
 		DMSG	<'Actually send packet, length = %ld',LF>
 		endc
 
-		move.l	du_BoardAddr1(a3),a1
+		move.l	du_BoardAddr(a3),a1
 		move.b	du_TPStart(a3),d1
 		lsl.w	#8,d1
 		add.w	d1,a1		; max. TPStart value is $7f
@@ -2205,8 +2200,6 @@ tx_buffm_error	clr.l	du_CurrentTxReq(a3)	;(not really necessary)
 ; device base in a6, init in a3
 ;
 ; (note: the counters reset when read)
-;
-; these are currently not used for anything
 ;
 ReadTallyCounters
 		move.l	a6,-(sp)
@@ -2461,7 +2454,7 @@ rec_copy2_entry	dbf	d0,rec_copy2_loop
 
 		move.b	du_PStart(a3),d0
 		lsl.w	#8,d0
-		move.l	du_BoardAddr1(a3),a0
+		move.l	du_BoardAddr(a3),a0
 		add.w	d0,a0
 
 		ifd	DEBUG
