@@ -46,6 +46,10 @@ EADDR_BYTES	equ	6
 		 ULONG	du_UnknownTypesReceived
 		 ULONG	du_Reconfigurations
 		 ULONG	du_BadMultiCastFilterCount
+		 ULONG	du_Collisions
+		 ULONG	du_Cntr0
+		 ULONG	du_Cntr1
+		 ULONG	du_Cntr2
 		 ULONG	du_TxLength
 		 STRUCT	du_LastStart,TV_SIZE
 		 STRUCT	du_TxBuff,PACKETBUFSIZE

@@ -37,6 +37,11 @@
 ; 1.17  - now 'Packets Received' global stat is incremented also for dropped
 ;	  packets.
 ;
+; 1.18  - IEEE802.3 send sets packet length field correctly
+;       - added collision count special stat.
+;	(also added tally counter interrupt, but the counter values
+;	are not used for anything yet...)
+;
 
 ;
 ; if DEBUG is defined, the device writes a lot of debugging
@@ -93,7 +98,7 @@ Ciaa		equ	$bfe001
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	17
+DEV_REVISION	equ	18
 
 ;
 ; start of the first hunk of the device file
@@ -1642,7 +1647,7 @@ dev_GetSpecialStats
 		beq	null_pointer
 
 		move.l	d0,a1
-		tst.l	S2SSH_RECORDCOUNTMAX(a1)
+		move.l	S2SSH_RECORDCOUNTMAX(a1),d1
 		beq	bad_stat_data
 		clr.l	S2SSH_RECORDCOUNTSUPPLIED(a1)
 ;
@@ -1654,11 +1659,26 @@ dev_GetSpecialStats
 		move.l	du_BadMultiCastFilterCount(a3),S2SSH_SIZE+S2SSR_COUNT(a1)
 		addq.l	#1,S2SSH_RECORDCOUNTSUPPLIED(a1)
 
+;
+; total number of collisions
+;
+		subq.l	#1,d1
+		beq.b	specialstats_done
+
+		move.l	#S2SS_ETHERNET_RETRIES,S2SSH_SIZE+S2SSR_SIZE+S2SSR_TYPE(a1)
+		lea	num_collisions_txt(pc),a0
+		move.l	a0,S2SSH_SIZE+S2SSR_SIZE+S2SSR_STRING(a1)
+		move.l	du_Collisions(a3),S2SSH_SIZE+S2SSR_SIZE+S2SSR_COUNT(a1)
+		addq.l	#1,S2SSH_RECORDCOUNTSUPPLIED(a1)
+
 specialstats_done
 		bra	TermIO
 
 bad_multicast_filter_txt
 		dc.b	'Bad multicast filtering',0
+
+num_collisions_txt
+		dc.b	'Number of collisions',0
 		ds.w	0
 
 ;
@@ -2038,7 +2058,12 @@ ActualSendPacket
 		move.w	IOS2_DSTADDR+4(a2),du_TxBuff+4(a3)
 		move.w	du_CurrentAddr(a3),du_TxBuff+6(a3)
 		move.l	du_CurrentAddr+2(a3),du_TxBuff+8(a3)
-		move.w	IOS2_PACKETTYPE+2(a2),du_TxBuff+12(a3)
+		move.w	IOS2_PACKETTYPE+2(a2),d0
+		cmp.w	#1500,d0
+		bhi.b	1$
+		move.w	IOS2_DATALENGTH+2(a2),d0	;IEEE802.3 packet length
+
+1$		move.w	d0,du_TxBuff+12(a3)
 
 		move.l	IOS2_DATALENGTH(a2),d0
 		move.l	IOS2_DATA(a2),a1
@@ -2111,6 +2136,34 @@ tx_buffm_error	clr.l	du_CurrentTxReq(a3)	;(not really necessary)
 		move.b	#S2WERR_BUFF_ERROR,d1
 		bra	IOError
 
+
+;
+; Read the counters 0/1/2
+; device base in a6, init in a3
+;
+; (note: the counters reset when read)
+;
+; these are currently not used for anything
+;
+ReadTallyCounters
+		move.l	a6,-(sp)
+		move.l	dev_SysBase(a6),a6
+		lib	Disable
+		move.l	du_BoardAddr1(a3),a0
+		moveq	#0,d0
+
+		move.b	NIC_CNTR0(a0),d0
+		add.l	d0,du_Cntr0(a3)
+
+		move.b	NIC_CNTR1(a0),d0
+		add.l	d0,du_Cntr1(a3)
+
+		move.b	NIC_CNTR2(a0),d0
+		add.l	d0,du_Cntr2(a3)
+
+		lib	Enable
+		move.l	(sp)+,a6
+		rts
 ;
 ; Ethernet card interrupt routine
 ;
@@ -2142,11 +2195,13 @@ NIC_IntRoutine	movem.l	d2/a2/a3/a4/a6,-(sp)
 		btst	#ISRB_RXE,d0
 		bne	receive_err
 
-;!!
-; handle all other interrupts here (there shouldn't be any...)
-; (note: tally counter interrupts are currently ignored)
-;!!
-		move.b	d0,NIC_ISR(a4)
+		btst	#ISRB_CNT,d0
+		beq	nic_int_ok
+
+		move.b	#ISRF_CNT,NIC_ISR(a4)
+
+		bsr	ReadTallyCounters
+
 		bra	nic_int_ok
 
 receive_ok	move.b	#ISRF_PRX,NIC_ISR(a4)		; clear interrupt
@@ -2542,6 +2597,14 @@ transmit_ok	and.b	#%1010,d0
 		bclr	#UNITB_CURRENTTX,UNIT_FLAGS(a3)
 		beq	nic_int_ok	; should not happen
 
+;
+; record number of collisions
+;
+		moveq	#0,d1
+		move.b	NIC_NCR(a4),d1
+		and.b	#%1111,d1
+		add.l	d1,du_Collisions(a4)
+
 ; Set IO_ERROR/WIREERROR if an error has been detected
 ; What is a good error number here??
 		btst	#3,d0
@@ -2552,7 +2615,6 @@ transmit_ok	and.b	#%1010,d0
 
 		move.l	#S2EVENT_ERROR!S2EVENT_TX!S2EVENT_HARDWARE,d0
 		bsr	DoEvent
-
 		bra.b	term_tx
 
 tx_ok		addq.l	#1,du_PacketsSent(a3)
