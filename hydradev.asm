@@ -87,7 +87,7 @@
 ;
 ; 1.35 -- trying to add PacketFilter support...
 ; 1.36 -- trying to add multiple read queues
-; 1.37 -- fixed device name
+; 1.37 -- fixed device name (???)
 ;
 ; 1.38 -- added Disable()/Enable() in CookieList handling
 ;	  in Open() and Close() routines.
@@ -99,6 +99,12 @@
 ; 1.40 -- fixed promiscuous mode flag bit check in close routine
 ;	  fixed collision statistics (but still not sure if it really works)
 ;
+; 1.41 -- fixed interrupt name
+;	  (really strange that it didn't get fixed earlier...)
+;
+; 1.42 -- fixed orphan packet/normal packet handling interaction
+;
+
 
 ;
 ; if DEBUG is defined, the device writes a lot of debugging
@@ -165,7 +171,7 @@ NIC_Delay	macro
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	40
+DEV_REVISION	equ	42
 
 ;
 ; start of the first hunk of the device file
@@ -192,9 +198,9 @@ dev_idstring	dc.b	'hydradev '
 		StrNumber DEV_VERSION
 		dc.b	'.'
 		StrNumber DEV_REVISION
-		dc.b	' (07.08.94)',CR,LF,0
+		dc.b	' (23.10.94)',CR,LF,0
 
-copyright_msg	dc.b	'Copyright © 1992,1993,1994 by JMP-Electronics / Bits & Chips, Finland',CR,LF,0
+copyright_msg	dc.b	'Copyright © 1992-1994 by JMP-Electronics / Bits & Chips, Finland',CR,LF,0
 
 expansion_name	dc.b	'expansion.library',0
 intuition_name	dc.b	'intuition.library',0
@@ -1867,7 +1873,8 @@ dev_ConfigInterface
 ; Add interrupt server
 ;
 		lea	du_NIC_Intr(a3),a1
-		move.l	LN_NAME(a6),LN_NAME(a1)
+		lea	dev_name(pc),a0
+		move.l	a0,LN_NAME(a1)
 		move.b	#NT_INTERRUPT,LN_TYPE(a1)
 		move.b	#20,LN_PRI(a1)
 		lea	NIC_IntRoutine(pc),a0
@@ -2479,7 +2486,7 @@ get_packet_type
 		DMSG	<'Packet type = $%lx',LF>
 		endc
 
-		moveq	#0,d4		;Packet copied-flag
+		moveq	#0,d4		;Packet copied/received-flag
 
 		cmp.w	#1500,d3
 		bhi.b	find_ethernet_ioreq
@@ -2492,7 +2499,7 @@ get_packet_type
 
 find_ieee802_cookie_loop
 		tst.l	(a5)
-		beq	orphan_packet
+		beq	rec_done
 
 		move.l	cookie_RxQueue+MLH_HEAD(a5),a2
 
@@ -2529,6 +2536,7 @@ find_ieee802_loop
 		beq.b	find_ieee802_next
 
 get_rec_packet1	bsr	ReturnRecIOReq
+		moveq	#-1,d4		;packet received
 
 find_ieee802_cookie_next
 		move.l	(a5),a5
@@ -2548,7 +2556,7 @@ find_ethernet_ioreq
 
 find_rec_ioreq_cookie_loop
 		tst.l	(a5)
-		beq	orphan_packet
+		beq	rec_done
 
 		move.l	cookie_RxQueue+MLH_HEAD(a5),a2
 
@@ -2584,6 +2592,7 @@ find_rec_ioreq_loop
 		beq.b	find_rec_ioreq_next
 
 get_rec_packet2	bsr	ReturnRecIOReq
+		moveq	#-1,d4		;packet received
 
 find_rec_ioreq_cookie_next
 		move.l	(a5),a5	
@@ -2593,10 +2602,12 @@ find_rec_ioreq_next
 		move.l	(a2),a2
 		bra.b	find_rec_ioreq_loop
 
+rec_done	tst.w	d4
+		bmi.b	next_packet
+
 ;
 ; handle orphan packets here
 ;
-orphan_packet
 		ifd	DEBUG
 		DMSG	<'Orphan packet',LF>
 		endc
