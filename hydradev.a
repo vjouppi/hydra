@@ -45,6 +45,9 @@
 ; 1.19	- CIA accesses between NIC accesses to keep the time between
 ;	  chip selects long enough.
 ;
+; 1.20  - NIC access delays done with a macro
+;
+;
 
 ;
 ; if DEBUG is defined, the device writes a lot of debugging
@@ -85,6 +88,15 @@ Ciaa		equ	$bfe001
 ;
 
 ;
+; Delay between NIC (Network Interface Controller) accesses. Done by
+; accessing a CIA chip.
+;
+NIC_Delay	macro
+		tst.b	Ciaa+ciapra
+		tst.b	Ciaa+ciapra
+		endm
+
+;
 ; bit numbers for S2EVENT_xxx
 ;
 		bitnum	S2EVENTB_ERROR,S2EVENT_ERROR
@@ -101,7 +113,7 @@ Ciaa		equ	$bfe001
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	19
+DEV_REVISION	equ	20
 
 ;
 ; start of the first hunk of the device file
@@ -128,7 +140,7 @@ dev_idstring	dc.b	'hydradev '
 		StrNumber DEV_VERSION
 		dc.b	'.'
 		StrNumber DEV_REVISION
-		dc.b	' (18.1.93)',CR,LF,0
+		dc.b	' (28.1.93)',CR,LF,0
 
 copyright_msg	dc.b	'Copyright © 1992 by Bits & Chips Oy, Finland',CR,LF,0
 
@@ -624,9 +636,9 @@ ram_end
 ; select page 0 & disable & clear NIC interrupts before adding interrupt server
 ;
 		move.b	#CRF_NODMA!CRF_STOP,NIC_CR(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	#0,NIC_IMR(a0)			; disable interrupts
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	#$ff,NIC_ISR(a0)		; clear interrupts
 
 ;
@@ -714,9 +726,9 @@ Expunge_Unit	movem.l	d2/a2/a3/a6,-(sp)
 		move.l	a1,a3
 		move.l	du_BoardAddr1(a3),a0
 		move.b	#CRF_NODMA!CRF_STOP,NIC_CR(a0) ; reset & select page 0
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	#0,NIC_IMR(a0)			 ; disable all interrupts
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	#$ff,NIC_ISR(a0)		 ; clear all interrupts
 
 		btst	#UNITB_ONLINE,UNIT_FLAGS(a3)
@@ -1284,7 +1296,7 @@ dev_AddMultiCast
 		lib	Disable
 		move.l	du_BoardAddr1(a3),a2
 		move.b	#CRF_PAGE0!CRF_NODMA!CRF_START,NIC_CR(a2)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		bset	d0,(a0)
 		move.b	#CRF_NODMA!CRF_START,NIC_CR(a2)
 		lib	Enable
@@ -1387,7 +1399,7 @@ dev_DelMultiCast
 		lib	Disable
 		move.l	du_BoardAddr1(a3),a2
 		move.b	#CRF_PAGE0!CRF_NODMA!CRF_START,NIC_CR(a2)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		bclr	d0,(a0)
 		move.b	#CRF_NODMA!CRF_START,NIC_CR(a2)
 		lib	Enable
@@ -1491,9 +1503,9 @@ online_ok	lea	du_NIC_Intr(a3),a1
 
 		move.l	du_BoardAddr1(a3),a0
 		move.b	#CRF_NODMA!CRF_START,NIC_CR(a0) ; start the NIC
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	#$ff,NIC_ISR(a0)	; clear interrupt status
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	#%00111111,NIC_IMR(a0)	; enable interrupts
 
 		lib	Permit
@@ -1539,9 +1551,9 @@ wait_tx_complete
 ;
 		move.l	du_BoardAddr1(a3),a0
 		move.b	#CRF_NODMA!CRF_STOP,NIC_CR(a0) ; reset & select page 0
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	#0,NIC_IMR(a0)			 ; disable all interrupts
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	#$ff,NIC_ISR(a0)		 ; clear all interrupts
 
 		lea	du_NIC_Intr(a3),a1
@@ -1726,84 +1738,84 @@ dev_ConfigInterface
 		move.l	du_BoardAddr1(a3),a0
 
 		move.b	#CRF_NODMA!CRF_STOP,NIC_CR(a0) ; page 0, reset NIC
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 
 ; fifo thres. 8, 68k byteorder, word-wide DMA
 		move.b	#DCRF_FT1!DCRF_LS!DCRF_BOS!DCRF_WTS,NIC_DCR(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 
 		moveq	#0,d0
 		move.b	d0,NIC_RBCR0(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	d0,NIC_RBCR1(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 
 ; accept broadcast & multicast
 		move.b	#RCRF_AB!RCRF_AM,NIC_RCR(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 
 		move.b	#TCRF_LB1,NIC_TCR(a0)	; loopback mode (for init)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 
 		move.b	du_PStart(a3),d0
 		move.b	d0,NIC_PSTART(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	d0,NIC_BNDRY(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	du_PStop(a3),NIC_PSTOP(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 
 		move.b	#$ff,NIC_ISR(a0)	; clear interrupt status
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	#%00111111,NIC_IMR(a0)	; enable interrupts
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 
 ; select page 1
 		move.b	#CRF_PAGE0!CRF_NODMA!CRF_STOP,NIC_CR(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 
 		move.b	du_CurrentAddr(a3),NIC_PAR0(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	du_CurrentAddr+1(a3),NIC_PAR1(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	du_CurrentAddr+2(a3),NIC_PAR2(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	du_CurrentAddr+3(a3),NIC_PAR3(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	du_CurrentAddr+4(a3),NIC_PAR4(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	du_CurrentAddr+5(a3),NIC_PAR5(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 
 ;
 ; clear all multicast filter bits
 ;
 		moveq	#0,d0
 		move.b	d0,NIC_MAR0(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	d0,NIC_MAR1(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	d0,NIC_MAR2(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	d0,NIC_MAR3(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	d0,NIC_MAR4(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	d0,NIC_MAR5(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	d0,NIC_MAR6(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	d0,NIC_MAR7(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 
 		move.b	du_PStart(a3),d0
 		addq.b	#1,d0
 		move.b	d0,NIC_CURR(a0)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	d0,du_NextPkt(a3)
 
 		move.b	#CRF_NODMA!CRF_START,NIC_CR(a0) ; page 0, start
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 
 		move.b	#0,NIC_TCR(a0)		; loopback mode off
 ;
@@ -2160,12 +2172,12 @@ tx_copy_loop1	dbf	d1,tx_copy_loop
 
 1$		move.l	du_BoardAddr1(a3),a0
 		move.b	du_TPStart(a3),NIC_TPSR(a0)	;transmit page
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	d0,NIC_TBCR0(a0)		;transmit byte count low
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		lsr.w	#8,d0
 		move.b	d0,NIC_TBCR1(a0)		;transmit byte count high
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 ; send packet
 		move.b	#CRF_NODMA!CRF_TRANSMIT!CRF_START,NIC_CR(a0)
 		rts
@@ -2198,11 +2210,11 @@ ReadTallyCounters
 
 		move.b	NIC_CNTR0(a0),d0
 		add.l	d0,du_Cntr0(a3)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 
 		move.b	NIC_CNTR1(a0),d0
 		add.l	d0,du_Cntr1(a3)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 
 		move.b	NIC_CNTR2(a0),d0
 		add.l	d0,du_Cntr2(a3)
@@ -2221,7 +2233,7 @@ NIC_IntRoutine	movem.l	d2/a2/a3/a4/a6,-(sp)
 		move.l	du_BoardAddr1(a3),a4
 		moveq	#0,d0
 		move.b	NIC_ISR(a4),d0
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		and.b	#$3f,d0
 		beq	nic_int_continue	;next interrupt server
 
@@ -2252,15 +2264,15 @@ NIC_IntRoutine	movem.l	d2/a2/a3/a4/a6,-(sp)
 		bra	nic_int_ok
 
 receive_ok	move.b	#ISRF_PRX,NIC_ISR(a4)		; clear interrupt
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 
 receive_packet	moveq	#0,d0
 		move.b	du_NextPkt(a3),d0
 
 		move.b	#CRF_PAGE0!CRF_NODMA!CRF_START,NIC_CR(a4)	;page 1
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	NIC_CURR(a4),d1
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	#CRF_NODMA!CRF_START,NIC_CR(a4)			;page 0
 		cmp.b	d0,d1
 		beq	nic_int_ok
@@ -2613,6 +2625,8 @@ next_packet	move.w	(a4),d0
 1$		move.l	du_BoardAddr1(a3),a4
 		move.b	d0,NIC_BNDRY(a4)
 
+		NIC_Delay
+
 		ifd	DEBUG
 		DMSG	<'New Boundary value = $%lx',LF>
 		endc
@@ -2639,7 +2653,7 @@ receive_err
 transmit_err
 transmit_ok	and.b	#%1010,d0
 		move.b	d0,NIC_ISR(a4)		;clear interrupt
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 
 		ifd	DEBUG
 		DMSG	<'Transmit complete interrupt ($%lx)',LF>
@@ -2725,7 +2739,7 @@ rec_buffer_overflow
 		addq.l	#1,du_Overruns(a3)
 
 		move.b	NIC_CR(a4),d2			; store TXP bit
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	#CRF_NODMA!CRF_STOP,NIC_CR(a4)	; stop the NIC
 ;
 ; 1.6 ms delay here !!
@@ -2734,7 +2748,7 @@ rec_buffer_overflow
 ; it shouldn't affect serial receive, for example)
 ;
 		move.w	#2000-1,d0
-busy_loop	tst.b	Ciaa+ciapra	; read a CIA location
+busy_loop	NIC_Delay	; read a CIA location
 		dbf	d0,busy_loop
 
 ;
@@ -2742,9 +2756,9 @@ busy_loop	tst.b	Ciaa+ciapra	; read a CIA location
 ;
 		moveq	#0,d0
 		move.b	d0,NIC_RBCR0(a4)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	d0,NIC_RBCR1(a4)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 ;
 ; check if resend is needed
 ;
@@ -2752,25 +2766,25 @@ busy_loop	tst.b	Ciaa+ciapra	; read a CIA location
 		beq.b	recb1
 
 		move.b	NIC_ISR(a4),d0		; read interrupt status
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		and.b	#ISRF_PTX!ISRF_TXE,d0	; completed?
 		beq.b	recb1
 
 		clr.b	d2			; clear resend flag
 
 recb1		move.b	#TCRF_LB1,NIC_TCR(a4)		; loopback mode
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	#CRF_NODMA!CRF_START,NIC_CR(a4)	; start the NIC
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 ;
 ; Now remove all packets from the receive buffer ring (!!)
 ; (This discards some good packets...)
 ;
 		move.b	#CRF_PAGE0!CRF_NODMA!CRF_START,NIC_CR(a4)	;page1
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	NIC_CURR(a4),d0
 		move.b	#CRF_NODMA!CRF_START,NIC_CR(a4)			;page0
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	d0,du_NextPkt(a3)
 		subq.b	#1,d0
 		cmp.b	du_PStart(a3),d0
@@ -2779,12 +2793,12 @@ recb1		move.b	#TCRF_LB1,NIC_TCR(a4)		; loopback mode
 		subq.b	#1,d0
 1$		move.l	du_BoardAddr1(a3),a4
 		move.b	d0,NIC_BNDRY(a4)
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 
 		move.b	#ISRF_OVW,NIC_ISR(a4)		; clear the interrupt
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 		move.b	#0,NIC_TCR(a4)	; loopback off
-		tst.b	Ciaa+ciapra
+		NIC_Delay
 
 		btst	#CRB_TRANSMIT,d2
 		beq.b	overflow_ok
