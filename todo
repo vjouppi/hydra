@@ -1,0 +1,5 @@
+S2_ONLINE & S2_OFFLINE shouldn't return error when already on/offline
+should do DoEvents with S2_ONLINE/S2_OFFLINE
+--> Check what A2065.device does
+
+The Enforcer hit $204:0 bug in 1.33 might already be fixed

@@ -109,6 +109,7 @@
 ;
 ; 1.44 -- now uses Enqueue to queue iorequests (uses priority)
 ;
+; 1.45 -- now clears global/special stats in S2_ONLINE
 ;
 
 
@@ -178,7 +179,7 @@ NIC_Delay	macro
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	44
+DEV_REVISION	equ	45
 
 ;
 ; start of the first hunk of the device file
@@ -205,9 +206,9 @@ dev_idstring	dc.b	'hydradev '
 		StrNumber DEV_VERSION
 		dc.b	'.'
 		StrNumber DEV_REVISION
-		dc.b	' (01.06.95)',CR,LF,0
+		dc.b	' (25.06.95)',CR,LF,0
 
-copyright_msg	dc.b	'Copyright © 1992-1994 by JMP-Electronics / Bits & Chips, Finland',CR,LF,0
+copyright_msg	dc.b	'Copyright © 1992-1995 by JMP-Electronics / Bits & Chips, Finland',CR,LF,0
 
 expansion_name	dc.b	'expansion.library',0
 intuition_name	dc.b	'intuition.library',0
@@ -1638,6 +1639,17 @@ online_ok	lea	du_NIC_Intr(a3),a1
 		lib	Intuition,CurrentTime
 		bset	#UNITB_ONLINE,UNIT_FLAGS(a3)
 		addq.l	#1,du_Reconfigurations(a3)
+
+;
+; reset stats
+;
+		clr.l	du_PacketsSent(a3)
+		clr.l	du_PacketsReceived(a3)
+		clr.l	du_BadPackets(a3)
+		clr.l	du_Overruns(a3)
+		clr.l	du_UnknownTypesReceived(a3)
+		clr.l	du_BadMultiCastFilterCount(a3)
+		clr.l	du_Collisions(a3)
 
 		moveq	#S2EVENT_ONLINE,d0
 		bsr	DoEvent
