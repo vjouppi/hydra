@@ -123,3 +123,7 @@ NIC_MAR7	equ	$7fff
 ;
 HYDRA_DEFADDR	equ	$7fc0
 
+HYDRA_CLRDMA	equ	$7fd1
+HYDRA_LOAD1	equ	$7fd2
+HYDRA_LOAD2	equ	$7fd5
+
