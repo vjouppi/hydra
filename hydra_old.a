@@ -1,0 +1,305 @@
+;
+; hydra.a
+;
+; Hydra Ethernet card testing...
+;
+
+		include	'exec/types.i'
+		include	'libraries/configvars.i'
+		include	'hardware/intbits.i'
+		include	'include.i'
+		include	'offsets.i'
+		include	'macros.i'
+
+HYDRA_MANUF_NUM		equ	2121
+HYDRA_PROD_NUM		equ	1
+
+;
+; hydra ethernet card register offsets (from BoardAddr + $8000)
+;
+
+;
+; page 0, write
+;
+NIC_CR		equ	$7fe1
+NIC_PSTART	equ	$7fe3
+NIC_PSTOP	equ	$7fe5
+NIC_BNDRY	equ	$7fe7
+NIC_TPSR	equ	$7fe9
+NIC_TBCR0	equ	$7feb
+NIC_TBCR1	equ	$7fed
+NIC_ISR		equ	$7fef
+NIC_RSAR0	equ	$7ff1
+NIC_RSAR1	equ	$7ff3
+NIC_RBCR0	equ	$7ff5
+NIC_RBCR1	equ	$7ff7
+NIC_RCR		equ	$7ff9
+NIC_TCR		equ	$7ffb
+NIC_DCR		equ	$7ffd
+NIC_IMR		equ	$7fff
+;
+; page 0, read
+;
+NIC_CLDA0	equ	$7fe3
+NIC_CLDA1	equ	$7fe5
+NIC_TSR		equ	$7fe9
+NIC_NCR		equ	$7feb
+NIC_FIFO	equ	$7fed
+NIC_CRDA0	equ	$7ff1
+NIC_CRDA1	equ	$7ff3
+NIC_RSR		equ	$7ff9
+NIC_CNTR0	equ	$7ffb
+NIC_CNTR1	equ	$7ffd
+NIC_CNTR2	equ	$7fff
+;
+; page 1
+;
+NIC_PAR0	equ	$7fe3
+NIC_PAR1	equ	$7fe5
+NIC_PAR2	equ	$7fe7
+NIC_PAR3	equ	$7fe9
+NIC_PAR4	equ	$7feb
+NIC_PAR5	equ	$7fed
+NIC_CURR	equ	$7fef
+NIC_MAR0	equ	$7ff1
+NIC_MAR1	equ	$7ff3
+NIC_MAR2	equ	$7ff5
+NIC_MAR3	equ	$7ff7
+NIC_MAR4	equ	$7ff9
+NIC_MAR5	equ	$7ffb
+NIC_MAR6	equ	$7ffd
+NIC_MAR7	equ	$7fff
+
+;
+; Ethernet address PROM
+;
+HYDRA_DEFADDR	equ	$7fc0
+
+
+		STRUCTURE MyData,0
+		 APTR	_ExecBase
+		 APTR	_DosBase
+		 APTR	_ExpansionBase
+		 APTR	_ConfigDev
+		 APTR	_BoardAddr
+		 APTR	_BoardAddr1	; board address + $8000
+		 STRUCT	_Interrupt,IS_SIZE
+		 STRUCT	_DefAddr,6
+		 UBYTE	_PStart		; receive page start
+		 UBYTE	_PStop		; receive page stop
+		 UBYTE	_TPStart	; transmit page start
+		 UBYTE	_NextPkt
+		LABEL MyData_SIZE
+
+DPRINTF		macro	;format_string
+		lea	DPRINTF_F\@(pc),a0
+		bsr	DPrintf
+		bra.s	DPRINTF_E\@
+DPRINTF_F\@	dc.b	\1
+		dc.b	0
+		ds.w	0
+DPRINTF_E\@
+		endm
+
+		xref	WriteStr
+		xdef	_DosBase
+
+start		move.l	#MyData_SIZE,d0
+		move.l	#MEMF_CLEAR!MEMF_PUBLIC,d1
+		lib	AbsExec,AllocMem
+		tst.l	d0
+		bne.s	1$
+		moveq	#20,d0
+
+1$		move.l	d0,a4
+		move.l	a6,_ExecBase(a4)
+
+		lea	dos_name(pc),a1
+		moveq	#0,d0
+		lib	OpenLibrary
+		move.l	d0,_DosBase(a4)
+		beq	cleanexit
+
+		lea	expansion_name(pc),a1
+		moveq	#0,d0
+		lib	OpenLibrary
+		move.l	d0,_ExpansionBase(a4)
+		beq	cleanexit
+
+		move.l	d0,a6
+		clra	a0
+		move.l	#HYDRA_MANUF_NUM,d0
+		move.l	#HYDRA_PROD_NUM,d1
+		lib	FindConfigDev
+		move.l	d0,_ConfigDev(a4)
+		bne.s	card_found
+
+		DPRINTF	<'Hydra ethernet card not found!',LF>
+		bra	cleanexit
+
+card_found	move.l	d0,a0
+		move.l	cd_BoardAddr(a0),d1
+		move.l	d1,_BoardAddr(a4)
+		add.l	#$8000,d1
+		move.l	d1,_BoardAddr1(a4)
+
+		DPRINTF	<'ConfigDev = $%lx, BoardAddr1 = $%lx',LF>
+;;
+;
+; this should actually check the amount of memory present on the ethernet card
+;
+		move.b	#8,_PStart(a4)
+		move.b	#$40,_PStop(a4)		;16K RAM
+		clr.b	_TPStart(a4)
+
+;
+; read the default address from the card
+;
+		move.l	_BoardAddr1(a4),a2
+		move.b	HYDRA_DEFADDR(a2),_DefAddr(a4)
+		move.b	HYDRA_DEFADDR+2(a2),_DefAddr+1(a4)
+		move.b	HYDRA_DEFADDR+4(a2),_DefAddr+2(a4)
+		move.b	HYDRA_DEFADDR+6(a2),_DefAddr+3(a4)
+		move.b	HYDRA_DEFADDR+8(a2),_DefAddr+4(a4)
+		move.b	HYDRA_DEFADDR+10(a2),_DefAddr+5(a4)
+
+
+		move.l	_DefAddr(a4),d0
+		moveq	#0,d1
+		move.w	_DefAddr+4(a4),d1
+		DPRINTF	<'Address PROM: %08lx%04lx',LF>
+
+;;
+;
+; initialize the card
+;
+		lib	Exec,Disable
+
+		move.l	_BoardAddr1(a4),a2
+		move.b	#%00100001,NIC_CR(a2)	; page 0, reset NIC
+		move.b	#%01001011,NIC_DCR(a2)	; fifo thres. 8, 68k byteorder
+
+		moveq	#0,d0
+		move.b	d0,NIC_RBCR0(a2)
+		move.b	d0,NIC_RBCR1(a2)
+
+		move.b	#%00000100,NIC_RCR(a2)	; accept broadcast
+
+		move.b	#%00000100,NIC_TCR(a2)	; loopback mode (for init)
+
+		move.b	_PStart(a4),d0
+		move.b	d0,NIC_PSTART(a2)
+		move.b	d0,NIC_BNDRY(a2)
+		move.b	_PStop(a4),NIC_PSTOP(a2)
+
+		move.b	#$ff,NIC_ISR(a2)	; clear interrupt status
+		move.b	#%00111111,NIC_IMR(a2)	; enable interrupts
+
+		move.b	#%01100001,NIC_CR(a2)	; select page 1
+
+		move.b	_DefAddr(a4),NIC_PAR0(a2)
+		move.b	_DefAddr+1(a4),NIC_PAR1(a2)
+		move.b	_DefAddr+2(a4),NIC_PAR2(a2)
+		move.b	_DefAddr+3(a4),NIC_PAR3(a2)
+		move.b	_DefAddr+4(a4),NIC_PAR4(a2)
+		move.b	_DefAddr+5(a4),NIC_PAR5(a2)
+
+; no need to initialize the multicast registers?
+		moveq	#-1,d0
+		move.b	d0,NIC_MAR0(a2)
+		move.b	d0,NIC_MAR1(a2)
+		move.b	d0,NIC_MAR2(a2)
+		move.b	d0,NIC_MAR3(a2)
+		move.b	d0,NIC_MAR4(a2)
+		move.b	d0,NIC_MAR5(a2)
+		move.b	d0,NIC_MAR6(a2)
+		move.b	d0,NIC_MAR7(a2)
+
+
+		move.b	_PStart(a4),d0
+		addq.b	#1,d0
+		move.b	d0,NIC_CURR(a2)
+		move.b	d0,_NextPkt(a4)
+
+		move.b	#%00100010,NIC_CR(a2)	; page 0, start
+
+		move.b	#0,NIC_TCR(a2)
+;
+; NIC is now ready for operation
+;
+;;
+		lea	_Interrupt(a4),a1
+		move.b	#NT_INTERRUPT,LN_TYPE(a1)
+		lea	int_routine(pc),a0
+		move.l	a0,IS_CODE(a1)
+		move.l	a4,IS_DATA(a1)
+		moveq	#INTB_PORTS,d0
+		lib	AddIntServer
+		lib	Enable
+;;
+
+		lea	control_c_msg(pc),a0
+		bsr	WriteStr
+		move.l	#SIGBREAKF_CTRL_C,d0
+		lib	Exec,Wait
+
+;;
+		move.l	_BoardAddr1(a4),a2
+		move.b	#0,NIC_IMR(a2)		;disable interrupts
+		move.b	#$ff,NIC_ISR(a2)	;clear interrupts
+
+		lea	_Interrupt(a4),a1
+		moveq	#INTB_PORTS,d0
+		lib	Exec,RemIntServer
+
+cleanexit	move.l	_ExpansionBase(a4),d0
+		beq.s	1$
+		move.l	d0,a1
+		lib	Exec,CloseLibrary
+
+1$		move.l	a4,a1
+		move.l	#MyData_SIZE,d0
+		lib	Exec,FreeMem
+		moveq	#0,d0
+		rts
+;;
+
+int_routine	move.l	_BoardAddr1(a1),a0
+		move.b	NIC_ISR(a0),d0
+		and.b	#$3f,d0
+		beq.s	int_end
+
+		move.b	d0,NIC_ISR(a0)	; clear interrupt flags
+
+		DPRINTF	<'Interrupt, ISR = $%lx',LF>
+
+int_end		moveq	#0,d0
+		rts
+
+;
+; Printf-like formatting with output to serial port (with RawPutChar)
+; format string in a0, arguments in d0-d7
+;
+DPrintf		movem.l	a2/a3/a6,-(sp)
+		movem.l	d0-d7,-(sp)
+		move.l	sp,a1
+		lea	PutCh(pc),a2
+		getbase	AbsExec
+		move.l	a6,a3
+		lib	RawDoFmt
+		lea	8*4(sp),sp
+		movem.l	(sp)+,a2/a3/a6
+		rts
+
+PutCh		move.l	a6,-(sp)
+		move.l	a3,a6
+		lib	RawPutChar
+		move.l	(sp)+,a6
+		rts
+
+dos_name	dc.b	'dos.library',0
+expansion_name	dc.b	'expansion.library',0
+
+control_c_msg	dc.b	'Press Control-C to exit...',LF,0
+
+		end
