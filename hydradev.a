@@ -1,0 +1,1295 @@
+;
+; hydradev.a  --  sanaII device driver for Hydra Systems ethetnet card
+;
+; Timo Rossi, 1992
+;
+
+;
+; WARNING: Very preliminary version!! most commands don't work!!
+;
+
+;
+; notes:
+;	- all assembler symbol names in sana2.i are in UPPER case
+;	- WireError is ULONG
+;	- The C-include file devices/sana2.h (revision 1.10)
+;	  has an error in the Sana2DeviceStats structure definition
+;	  - SoftMisses-field is missing
+;
+; (Disable/Enable should be replaced with routines that only disable/enable
+; the PORTS/ExtLevel2 interrupt)
+;
+
+;
+; Receive, multicast receive, type stats, special stats and events are
+; not implemented yet.
+;
+; transmit works, but something seems to be trashing memory somewhere...
+;
+
+DEBUG		set	1
+
+;;;
+		nolist
+
+		include	'exec/types.i'
+		include	'exec/resident.i'
+		include	'exec/interrupts.i'
+		include	'exec/devices.i'
+		include	'exec/io.i'
+		include	'exec/errors.i'
+		include	'exec/memory.i'
+		include	'exec/initializers.i'
+		include	'devices/timer.i'
+		include	'utility/tagitem.i'
+		include	'libraries/configvars.i'
+		include	'hardware/intbits.i'
+
+		include	'offsets.i'
+
+		include	'devices/sana2.i'
+
+		list
+
+		include	'hydraboard.i'
+		include	'hydradev.i'
+
+		include	'macros.i'
+
+;;; put these in an include file
+
+dev_SafeExit	moveq	#-1,d0
+		rts
+
+dev_romtag	dc.w	RTC_MATCHWORD	;rt_MatchWord
+		dc.l	dev_romtag	;rt_MatchTag
+		dc.l	dev_endskip	;rt_EndSkip
+		dc.b	RTF_AUTOINIT	;rt_Flags
+		dc.b	DEV_VERSION	;rt_Version
+		dc.b	NT_DEVICE	;rt_Type
+		dc.b	0		;rt_Pri
+		dc.l	dev_name
+		dc.l	dev_idstring
+		dc.l	dev_init
+
+dev_name	dc.b	'hydra.device',0
+
+		dc.b	'$VER: '
+dev_idstring	dc.b	'hydradev '
+		StrNumber DEV_VERSION
+		dc.b	'.'
+		StrNumber DEV_REVISION
+		dc.b	' (6.11.92)',CR,LF,0
+
+copyright_msg	dc.b	'Copyright © 1992 by Bits & Chips Oy, Finland',CR,LF,0
+
+expansion_name	dc.b	'expansion.library',0
+intuition_name	dc.b	'intuition.library',0
+
+		ds.w	0	;word align
+
+;
+; because the RTF_AUTOINIT flag in the RomTag structure was set
+; RT_INIT points to this table of parameters for MakeLibrary()
+;
+dev_init	dc.l	dev_DataSize
+		dc.l	dev_FuncInit
+		dc.l	dev_StructInit
+		dc.l	dev_InitRoutine
+
+devfunc	macro
+		dc.w	\1-dev_FuncInit
+		endm
+
+;
+; device function init
+;
+dev_FuncInit	dc.w	-1
+; standard library routines
+		devfunc	dev_Open
+		devfunc	dev_Close
+		devfunc	dev_Expunge
+		devfunc	dev_Reserved
+; standard device routines
+		devfunc	dev_BeginIO
+		devfunc	dev_AbortIO
+		dc.w	-1
+
+;
+; device structure init
+;
+dev_StructInit	INITBYTE LN_TYPE,NT_DEVICE
+		INITLONG LN_NAME,dev_name
+		INITLONG LIB_IDSTRING,dev_idstring
+		INITBYTE LIB_FLAGS,LIBF_CHANGED!LIBF_SUMUSED
+		INITLONG LIB_VERSION,(DEV_VERSION<<16)+DEV_REVISION
+		dc.l	0
+
+;
+; Device initialization routine
+;
+; Entry:
+;   d0  -  device base
+;   a6  -  execbase
+;
+; Return:
+;   d0  -  device base if successfull, zero if not
+;
+dev_InitRoutine	move.l	a4,-(sp)
+
+		ifd	DEBUG
+		DMSG	<'Device init entry (device = $%lx)',LF>
+		endc
+
+		move.l	d0,a4			;get device base in a4
+		move.l	a0,dev_SegList(a4)	;save seglist for expunge
+		move.l	a6,dev_SysBase(a4)
+
+		lea	expansion_name(pc),a1
+		moveq	#0,d0
+		lib	OpenLibrary
+		move.l	d0,dev_ExpansionBase(a4)
+		beq.s	initfail1
+
+		lea	intuition_name(pc),a1
+		moveq	#0,d0
+		lib	OpenLibrary
+		move.l	d0,dev_IntuitionBase(a4)
+		beq.s	initfail2
+
+		move.l	a4,d0
+		move.l	(sp)+,a4
+		rts
+
+initfail2	move.l	dev_ExpansionBase(a4),a1
+		lib	CloseLibrary
+
+initfail1
+		ifd	DEBUG
+		DMSG	<'Device init fail',LF>
+		endc
+
+		move.l	(sp)+,a4
+
+dev_Reserved	moveq	#0,d0
+		rts
+
+;
+; Device open routine
+;
+; Entry:
+;   a6  -  device base
+;   a1  -  io request
+;   d0  -  unit number
+;   d1  -  flags
+;
+; Return:
+;   d0  -  zero if successfull, error code if failure
+;
+; (Note: promiscuous mode flag is currently ignored!!)
+;
+dev_Open	movem.l	d2/d3/a2/a3,-(sp)
+
+		ifd	DEBUG
+		DMSG	<'Device open entry (unit = %ld, flags = $%lx)',LF>
+		endc
+
+		move.l	d1,d3
+		move.l	a1,a2
+		moveq	#NUM_UNITS,d2
+		cmp.l	d2,d0
+		bcc	open_fail
+		move.l	d0,d2
+		lsl.l	#2,d2
+		move.l	dev_UnitTable(a6,d2.l),d0
+		bne.s	unit_ok
+
+		move.l	d2,d0
+		bsr	Initialize_Unit
+		tst.l	d0
+		beq.s	open_fail
+
+		move.l	d0,dev_UnitTable(a6,d2.l)
+
+unit_ok		move.l	d0,a3
+		tst.w	UNIT_OPENCNT(a3)
+		beq.s	excl_ok1
+		btst	#SANA2OPB_MINE,d3
+		bne	excl_open_fail
+
+excl_ok1	btst	#UNITB_EXCLUSIVE,UNIT_FLAGS(a3)
+		bne	excl_open_fail
+
+		btst	#SANA2OPB_MINE,d3
+		beq.s	excl_ok2
+		bset	#UNITB_EXCLUSIVE,UNIT_FLAGS(a3)
+
+excl_ok2	move.l	IOS2_BUFFERMANAGEMENT(a2),a1
+		bsr	InitBuffManagement
+		move.l	d0,IOS2_BUFFERMANAGEMENT(a2)
+		beq.s	open_fail
+
+		move.l	a3,IO_UNIT(a2)
+		addq.w	#1,UNIT_OPENCNT(a3)
+		addq.w	#1,LIB_OPENCNT(a6)
+		and.b	#~LIBF_DELEXP,LIB_FLAGS(a6)
+
+		ifd	DEBUG
+		DMSG	<'Open successfull',LF>
+		endc
+
+		moveq	#0,d0
+
+open_exit	movem.l	(sp)+,d2/d3/a2/a3
+		rts
+
+open_fail	moveq	#IOERR_OPENFAIL,d0
+
+open_err	moveq	#-1,d1
+		move.l	d1,IO_DEVICE(a2)
+		move.l	d1,IO_UNIT(a2)
+
+		move.b	d0,IO_ERROR(a2)
+
+		ifd	DEBUG
+		DMSG	<'Device open failed, error %ld',LF>
+		endc
+
+		bra.s	open_exit
+
+excl_open_fail	moveq	#IOERR_UNITBUSY,d0
+		bra.s	open_err
+
+;
+; Device close routine
+;
+; Entry:
+;   a6  -  device base
+;   a1  -  io request
+;
+; Return:
+;   d0  -  seglist if device no longer in use, else zero
+;
+dev_Close	movem.l	a2/a3,-(sp)
+
+		ifd	DEBUG
+		DMSG	<'Device close entry',LF>
+		endc
+
+		move.l	a1,a2
+		move.l	IO_UNIT(a2),a3
+		bclr	#UNITB_EXCLUSIVE,UNIT_FLAGS(a3)
+
+		moveq	#-1,d0
+		move.l	d0,IO_DEVICE(a2)
+		move.l	d0,IO_UNIT(a2)
+
+		move.l	IOS2_BUFFERMANAGEMENT(a2),a1
+		move.l	#buffm_Sizeof,d0
+		lib	Exec,FreeMem
+
+		subq.w	#1,UNIT_OPENCNT(a3)
+
+		moveq	#0,d0
+		subq.w	#1,LIB_OPENCNT(a6)
+		bne.s	close_end
+		btst	#LIBB_DELEXP,LIB_FLAGS(a6)
+		beq.s	close_end
+		bsr.s	dev_Expunge
+
+close_end	movem.l	(sp)+,a2/a3
+		rts
+
+;
+; Device expunge routine
+;
+; Entry:
+;   a6  -  device base
+;
+; Return:
+;   d0  -  seglist if device no longer in use, else zero
+;
+dev_Expunge	tst.w	LIB_OPENCNT(a6)
+		beq.s	do_expunge
+		or.b	#LIBF_DELEXP,LIB_FLAGS(a6)
+		moveq	#0,d0
+		rts
+
+do_expunge	movem.l	d2/d3/a4/a6,-(sp)
+
+		ifd	DEBUG
+		DMSG	<'do_expunge entry',LF>
+		endc
+
+		moveq	#NUM_UNITS-1,d3
+
+unit_expunge_loop
+		move.l	d3,d2
+		lsl.l	#2,d2
+		move.l	dev_UnitTable(a6,d2.l),d0
+		beq.s	unit_expunge_next
+
+		move.l	d0,a1
+		bsr	Expunge_Unit
+
+		clr.l	dev_UnitTable(a6,d2.l)
+
+unit_expunge_next
+		dbf	d3,unit_expunge_loop
+
+		move.l	a6,a4
+		move.l	dev_SysBase(a4),a6
+
+		move.l	dev_ExpansionBase(a4),a1
+		lib	CloseLibrary
+
+		move.l	dev_IntuitionBase(a4),a1
+		lib	CloseLibrary
+
+		move.l	dev_SegList(a4),d2
+		lib	Remove
+
+		move.l	a4,a1
+		moveq	#0,d0
+		moveq	#0,d1
+		move.w	LIB_NEGSIZE(a4),d0
+		move.w	LIB_POSSIZE(a4),d1
+		sub.l	d0,a1
+		add.l	d1,d0
+		lib	FreeMem
+
+		move.l	d2,d0
+		movem.l	(sp)+,d2/d3/a4/a6
+		rts
+
+;
+; Initialize buffer management magic cookie
+;
+; Entry:
+;   a1  -  buffer management taglist
+;
+InitBuffManagement
+		movem.l	a2/a3,-(sp)
+		move.l	a1,a2
+
+		ifd	DEBUG
+		move.l	a1,d0
+		DMSG	<'InitBuffManagement entry, taglist = $%lx',LF>
+		endc
+
+		move.l	#buffm_Sizeof,d0
+		move.l	#MEMF_PUBLIC,d1
+		lib	Exec,AllocMem
+		tst.l	d0
+		beq	initbuffm_exit
+		move.l	d0,a3
+
+		lea	DummyCopy(pc),a0
+		move.l	a0,buffm_CopyToBuff(a3)
+		move.l	a0,buffm_CopyFromBuff(a3)
+
+		move.l	a2,d0
+		beq.s	initbuffm_ok
+
+buffm_tag_loop	move.l	(a2)+,d0
+		beq.s	initbuffm_ok	;TAG_DONE == 0
+
+		cmp.l	#S2_COPYTOBUFF,d0
+		bne.s	1$
+		move.l	(a2)+,buffm_CopyToBuff(a3)
+		bra.s	buffm_tag_loop
+
+1$		cmp.l	#S2_COPYFROMBUFF,d0
+		bne.s	2$
+		move.l	(a2)+,buffm_CopyFromBuff(a3)
+		bra.s	buffm_tag_loop
+
+2$		subq.l	#TAG_IGNORE,d0
+		bne.s	3$
+
+55$		addq.l	#4,a2
+		bra.s	buffm_tag_loop
+
+3$		subq.l	#TAG_MORE-TAG_IGNORE,d0
+		bne.s	4$
+
+		move.l	(a2),a2
+		bra.s	buffm_tag_loop
+
+4$		subq.l	#TAG_SKIP-TAG_MORE,d0
+		bne.s	55$
+		addq.l	#8,a2
+		bra.s	55$
+
+initbuffm_ok
+		ifd	DEBUG
+		move.l	buffm_CopyFromBuff(a3),d0
+		move.l	buffm_CopyToBuff(a3),d1
+		DMSG	<'CopyFromBuff = $%lx, CopyToBuff = $%lx',LF>
+		endc
+
+		move.l	a3,d0
+
+initbuffm_exit	movem.l	(sp)+,a2/a3
+		rts
+
+;
+; Dummy copy routine for buffer management
+;
+DummyCopy	moveq	#1,d0		; success
+		rts
+
+;
+; Initialize an unit
+;
+; Entry:
+;  d0  -  unit number
+;  a6  -  device base
+;
+; Return:
+;  d0  -  pointer to unit structure or zero if failed
+;
+; Note: Unit number is zero for first Hydra board, one for second etc.
+;       Initialize_Unit will fail if the board already has
+;       the CONFIGME bit cleared
+;
+Initialize_Unit	movem.l	d2/d3/a2/a3,-(sp)
+
+		ifd	DEBUG
+		DMSG	<'Initialize unit entry, number = %ld',LF>
+		endif
+
+		move.l	d0,d2
+		move.l	d0,d3
+
+		suba.l	a0,a0
+
+find_board_loop
+		move.l	#HYDRA_MANUF_NUM,d0
+		move.l	#HYDRA_PROD_NUM,d1
+		lib	Expansion,FindConfigDev
+		tst.l	d0
+		beq	init_unit_exit
+		tst.l	d3
+		beq.s	found_board
+		subq.l	#1,d3
+		move.l	d0,a0
+		bra.s	find_board_loop
+
+found_board	move.l	d0,a2
+		bclr	#CDB_CONFIGME,cd_Flags(a2)
+		beq	init_unit_exit	; board already configured
+
+		ifd	DEBUG
+		DMSG	<'Found Hydra ethernet board, configdev = $%lx',LF>
+		endc
+
+;
+; find out the amount of RAM memory on the ethernet card
+;
+		moveq	#0,d3
+		move.l	cd_BoardAddr(a2),a0
+		add.l	#$8000,a0
+		move.w	#$5555,d0
+		move.w	#$aaaa,d1
+
+ram_size_loop	move.w	d0,0(a0,d3)
+		move.w	d1,2(a0,d3)
+		cmp.w	0(a0,d3),d0
+		bne.s	ram_end
+		cmp.w	2(a0,d3),d1
+		bne.s	ram_end
+		add.w	#$100,d3
+		cmp.w	#$7f00,d3
+		bcs.s	ram_size_loop
+		bra	ram_error
+
+ram_end
+		ifd	DEBUG
+		move.l	d3,d0
+		DMSG	<'Receive buffer end (end of card RAM) = $%lx',LF>
+		endc
+
+		tst.w	d3
+		beq	ram_error
+		lsr.w	#8,d3
+
+		move.l	#du_Sizeof,d0
+		move.l	#MEMF_PUBLIC!MEMF_CLEAR,d1
+		lib	Exec,AllocMem
+		tst.l	d0
+		beq	init_unit_alloc_fail
+
+		move.l	d0,a3
+		move.l	a6,du_DevicePtr(a3)
+		move.l	d2,du_UnitNum(a3)
+		move.l	a2,du_ConfigDev(a3)
+		move.l	cd_BoardAddr(a2),a0
+		move.l	a0,du_BoardAddr(a3)
+		add.l	#$8000,a0
+		move.l	a0,du_BoardAddr1(a3)
+
+		moveq	#-1,d0
+		move.l	d0,du_CurrentAddr(a3)
+		move.w	d0,du_CurrentAddr+4(a3)
+;
+; select page 0 & disable & clear NIC interrupts before adding interrupt server
+;
+		move.b	#CMDF_NODMA!CMDF_STOP,NIC_CR(a0)
+		move.b	#0,NIC_IMR(a0)			; disable interrupts
+		move.b	#$ff,NIC_ISR(a0)		; clear interrupts
+
+;
+; read default ethernet address from board PROM
+;
+		lea	HYDRA_DEFADDR(a0),a0
+		lea	du_DefaultAddr(a3),a1
+
+		moveq	#EADDR_BYTES-1,d0
+get_def_addr_loop
+		move.b	(a0),(a1)+
+		addq.l	#2,a0
+		dbf	d0,get_def_addr_loop
+
+		lea	du_NIC_Intr(a3),a1
+		move.l	LN_NAME(a6),LN_NAME(a1)
+		move.b	#NT_INTERRUPT,LN_TYPE(a1)
+		move.b	#20,LN_PRI(a1)
+		lea	NIC_IntRoutine(pc),a0
+		move.l	a0,IS_CODE(a1)
+		move.l	a3,IS_DATA(a1)
+		moveq	#INTB_PORTS,d0
+		lib	Exec,AddIntServer
+
+;
+; initialize transmit page start/receive buffer start/end page variables
+;
+		clr.b	du_TPStart(a3)
+		move.b	#8,du_PStart(a3)
+		move.b	d3,du_PStop(a3)
+
+;
+; initialize unit transmit/receive queues
+;
+		lea	du_TxQueue(a3),a0
+		NEWLIST	a0
+
+		lea	du_RxQueue(a3),a0
+		NEWLIST	a0
+
+		lea	du_RxOrphanQueue(a3),a0
+		NEWLIST	a0
+
+init_unit_ok	move.l	a3,d0
+
+init_unit_exit
+		ifd	DEBUG
+		DMSG	<'Initialize_Unit return = $%lx',LF>
+		endc
+
+		movem.l	(sp)+,d2/d3/a2/a3
+		rts
+
+ram_error
+init_unit_alloc_fail
+		bset	#CDB_CONFIGME,cd_Flags(a2)
+		moveq	#0,d0
+		bra.s	init_unit_exit
+;
+; Unit expunge routine
+;
+; Entry:
+;  a1  -  pointer to unit structure
+;
+; Return:
+;  nothing
+;
+Expunge_Unit	movem.l	a3/a6,-(sp)
+		move.l	dev_SysBase(a6),a6
+
+		ifd	DEBUG
+		move.l	a1,d0
+		move.l	du_UnitNum(a1),d1
+		DMSG	<'Expunge_Unit called, unit = $%lx (#%ld)',LF>
+		endc
+
+		move.l	a1,a3
+		move.l	du_BoardAddr1(a3),a0
+		move.b	#CMDF_NODMA!CMDF_STOP,NIC_CR(a0) ; reset & select page 0
+		move.b	#0,NIC_IMR(a0)			 ; disable all interrupts
+		move.b	#$ff,NIC_ISR(a0)		 ; clear all interrupts
+
+		lea	du_NIC_Intr(a3),a1
+		moveq	#INTB_PORTS,d0
+		lib	RemIntServer
+
+		move.l	a3,a1
+		move.l	du_ConfigDev(a3),a3
+		move.l	#du_Sizeof,d0
+		lib	FreeMem
+;
+; allow re-configuration of the board
+;
+		bset	#CDB_CONFIGME,cd_Flags(a3)
+		movem.l	(sp)+,a3/a6
+		rts
+;
+; BeginIO routine
+;
+;
+;
+dev_BeginIO	movem.l	a2/a3,-(sp)
+		move.l	a1,a2
+		clr.b	LN_TYPE(a2)		;LN_TYPE != NT_REPLYMSG
+		clr.b	IO_ERROR(a2)
+		clr.l	IOS2_WIREERROR(a2)
+		move.l	IO_UNIT(a2),a3
+
+		ifd	DEBUG
+		move.l	a1,d0
+		moveq	#0,d1
+		move.w	IO_COMMAND(a1),d1
+		DMSG	<'BeginIO, request = $%lx, command = $%lx',LF>
+		endc
+
+		move.w	IO_COMMAND(a2),d0
+		cmp.w	#S2_END,d0
+		bcc.s	invalid_cmd
+
+		add.w	d0,d0	; d0 *= 2
+		lea	dev_CmdTable(pc),a0
+		move.l	a0,a1
+		add.w	d0,a1
+		add.w	(a1),a0
+
+		jsr	(a0)
+
+beginio_exit	movem.l	(sp)+,a2/a3
+		rts
+
+invalid_cmd	moveq	#IOERR_NOCMD,d0
+		moveq	#0,d1
+
+IOError		move.b	d0,IO_ERROR(a2)
+		move.b	d1,IOS2_WIREERROR+3(a2)
+
+;
+; a2 - iorequest, a3 - unit, a6 - device
+;
+TermIO
+		ifd	DEBUG
+		move.l	d2,-(sp)
+		move.l	a2,d0
+		moveq	#0,d1
+		move.w	IO_COMMAND(a2),d1
+		moveq	#0,d2
+		move.b	IO_ERROR(a2),d2
+		DMSG	<'TermIO, req = $%lx, cmd = $%lx, err = $%lx',LF>
+		move.l	(sp)+,d2
+		endc
+
+		move.l	a2,a1
+		btst	#SANA2IOB_QUICK,IO_FLAGS(a1)
+		bne.s	termio_exit
+		lib	Exec,ReplyMsg
+termio_exit	rts
+
+;
+; AbortIO routine, currently not fully implemented (!!)
+;
+;
+dev_AbortIO	movem.l	a2/a3,-(sp)
+		move.l	a1,a2
+
+		ifd	DEBUG
+		move.l	a1,d0
+		DMSG	<'AbortIO, request = $%lx',LF>
+		endc
+
+		move.w	IO_COMMAND(a2),d0
+		cmp.w	#CMD_WRITE,d0
+		beq.s	abort_write
+		cmp.w	#S2_MULTICAST,d0
+		beq.s	abort_write
+		cmp.w	#S2_BROADCAST,d0
+		beq.s	abort_write
+
+		;!!!!
+		bra.s	AbortIO_End
+
+abort_write	bclr	#IOB_QUEUED,IO_FLAGS(a2)
+		beq.s	AbortIO_End
+
+		move.l	a2,a1
+		lib	Exec,Remove
+		moveq	#IOERR_ABORTED,d0
+		moveq	#0,d1
+		bsr	IOError
+
+AbortIO_End	movem.l	(sp)+,a2/a3
+		rts
+
+;
+; Device command table
+;
+dev_cmd		macro
+		dc.w	\1-dev_CmdTable
+		endm
+
+dev_CmdTable	dev_cmd	invalid_cmd		;CMD_INVALID
+		dev_cmd	invalid_cmd		;CMD_RESET
+		dev_cmd	dev_Read		;CMD_READ
+		dev_cmd	dev_Write		;CMD_WRITE
+		dev_cmd	invalid_cmd		;CMD_UPDATE
+		dev_cmd	invalid_cmd		;CMD_CLEAR
+		dev_cmd	invalid_cmd		;CMD_STOP
+		dev_cmd	invalid_cmd		;CMD_START
+		dev_cmd	invalid_cmd		;CMD_FLUSH (should implement this??)
+		dev_cmd	dev_DeviceQuery		;S2_DEVICEQUERY
+		dev_cmd	dev_GetStationAddr	;S2_GETSTATIONADDRESS
+		dev_cmd	dev_ConfigInterface	;S2_CONFIGINTERFACE
+		dev_cmd	invalid_cmd		;reserved
+		dev_cmd	invalid_cmd		;reserved
+		dev_cmd	invalid_cmd		;S2_ADDMULTICASTADDRESS (not imple-
+		dev_cmd	invalid_cmd		;S2_DELMULTICASTADDRESS mented yet)
+		dev_cmd	dev_Multicast		;S2_MULTICAST
+		dev_cmd	dev_Broadcast		;S2_BROADCAST
+		dev_cmd	invalid_cmd		;S2_TRACKTYPE	  (not
+		dev_cmd	invalid_cmd		;S2_UNTRACKTYPE   implemented
+		dev_cmd	invalid_cmd		;S2_GETTYPESTATS  yet
+		dev_cmd	invalid_cmd		;S2_GETSPECIALSTATS )
+		dev_cmd	dev_GetGlobalStats	;S2_GETGLOBALSTATS
+		dev_cmd	invalid_cmd		;S2_ONEVEN  (not implemented yet)
+		dev_cmd	dev_ReadOrphan		;S2_READORPHAN
+		dev_cmd	dev_OnLine		;S2_ONLINE
+		dev_cmd	dev_OffLine		;S2_OFFLINE
+
+;
+; these command are not yet implemented
+;
+dev_Read	DMSG	<'CMD_READ',LF>
+		bra	invalid_cmd
+
+dev_ReadOrphan	DMSG	<'S2_READORPHAN',LF>
+		bra	invalid_cmd
+
+;
+; S2_ONLINE
+;
+dev_OnLine
+		ifd	DEBUG
+		DMSG	<'S2_ONLINE',LF>
+		endc
+
+		btst	#UNITB_CONFIGURED,UNIT_FLAGS(a3)
+		beq	not_configured
+
+		bset	#UNITB_ONLINE,UNIT_FLAGS(a3)
+		beq	TermIO
+
+		moveq	#S2ERR_BAD_STATE,d0
+		moveq	#S2WERR_UNIT_ONLINE,d1
+		bra	IOError
+
+;
+; S2_OFFLINE
+;
+dev_OffLine
+		ifd	DEBUG
+		DMSG	<'S2_OFFLINE',LF>
+		endc
+
+		btst	#UNITB_CONFIGURED,UNIT_FLAGS(a3)
+		beq	not_configured
+
+		bclr	#UNITB_ONLINE,UNIT_FLAGS(a3)
+		bne	offline_ok
+
+		moveq	#S2ERR_BAD_STATE,d0
+		moveq	#S2WERR_UNIT_OFFLINE,d1
+		bra	IOError
+
+offline_ok
+;
+; should abort all pending iorequests here!!!!
+;
+
+		bra	TermIO
+
+;
+; S2_DEVICEQUERY-command
+;
+; IOS2_STATDATA  -  pointer to DeviceQuery structure
+;
+dev_DeviceQuery
+		ifd	DEBUG
+		DMSG	<'S2_DEVICEQUERY',LF>
+		endc
+
+		move.l	IOS2_STATDATA(a2),d0
+		beq.s	null_pointer
+
+		move.l	d0,a1
+		cmp.l	#S2DQ_SIZE,S2DQ_SIZEAVAILABLE(a1)
+		bcs.s	devquery_not_enough_space
+
+		addq.l	#4,a1
+		lea	DevQueryData(pc),a0
+		move.l	#S2DQ_SIZE-4,d0
+		lib	Exec,CopyMem
+		bra	TermIO
+
+devquery_not_enough_space
+		moveq	#S2ERR_BAD_ARGUMENT,d0
+		moveq	#S2WERR_BAD_STATDATA,d1
+		bra	IOError
+
+null_pointer	moveq	#S2ERR_BAD_ARGUMENT,d0
+		moveq	#S2WERR_NULL_POINTER,d1
+		bra	IOError
+
+DevQueryData	dc.l	S2DQ_SIZE
+		dc.l	0
+		dc.l	0
+		dc.w	EADDR_BYTES*8		;AddrFieldSize
+		dc.l	1500			;MTU
+		dc.l	10000000		;bps
+		dc.l	S2WIRETYPE_ETHERNET
+
+;
+; S2_GETSTATIONADDRESS-command
+;
+; IOS2_SRCADDR  -  current address
+; IOS2_DSTADDR  -  default address
+;
+dev_GetStationAddr
+		ifd	DEBUG
+		DMSG	<'S2_GETSTATIONADDRESS',LF>
+		endc
+
+		move.l	a6,-(sp)
+		move.l	dev_SysBase(a6),a6
+		lib	Forbid
+
+		move.l	du_CurrentAddr(a3),IOS2_SRCADDR(a2)
+		move.w	du_CurrentAddr+4(a3),IOS2_SRCADDR+4(a2)
+		move.l	du_DefaultAddr(a3),IOS2_DSTADDR(a2)
+		move.w	du_DefaultAddr+4(a3),IOS2_DSTADDR+4(a2)
+
+		lib	Permit
+		move.l	(sp)+,a6
+
+		bra	TermIO
+
+;
+; S2_GETGLOBALSTATS
+;
+; IOS2_STATDATA  -  pointer to Sana2DeviceStats structure
+;
+dev_GetGlobalStats
+		ifd	DEBUG
+		DMSG	<'S2_GETGLOBALSTATS',LF>
+		endc
+
+		move.l	IOS2_STATDATA(a2),d0
+		beq	null_pointer
+
+		movem.l	a5/a6,-(sp)
+		move.l	d0,a5
+		move.l	dev_SysBase(a6),a6
+		lib	Disable
+
+		move.l	du_PacketsReceived(a3),S2DS_PACKETSRECEIVED(a5)
+		move.l	du_PacketsSent(a3),S2DS_PACKETSSENT(a5)
+		move.l	du_BadPackets(a3),S2DS_BADDATA(a5)
+		move.l	du_Overruns(a3),S2DS_OVERRUNS(a5)
+		move.l	du_SoftMisses(a3),S2DS_SOFTMISSES(a5)
+		move.l	du_UnknownTypesReceived(a3),S2DS_RECONFIGURATIONS(a5)
+		moveq	#1,d0
+		move.l	d0,S2DS_RECONFIGURATIONS(a5)
+		move.l	du_LastStart+TV_SECS(a3),S2DS_LASTSTART+TV_SECS(a5)
+		move.l	du_LastStart+TV_MICRO(a3),S2DS_LASTSTART+TV_MICRO(a5)
+
+		lib	Enable
+		movem.l	(sp)+,a5/a6
+
+		bra	TermIO
+
+;
+; S2_CONFIGINTERFACE
+;
+; IOS2_SRCADDR  --  address of the interface (to be configured)
+;
+; Note that according to the SanaII-spec, the driver should refuse
+; to configure itself to any other address than the hardware default.
+; This implementation allows configuration to any (non-multicast) address
+;
+dev_ConfigInterface
+		ifd	DEBUG
+		DMSG	<'S2_CONFIGINTERFACE',LF>
+		endc
+
+		bset	#UNITB_CONFIGURED,UNIT_FLAGS(a3)
+		bne	already_configured
+
+		btst	#0,IOS2_SRCADDR(a2)	;check multicast flag
+		bne	config_bad_addr
+
+		move.l	IOS2_SRCADDR(a2),du_CurrentAddr(a3)
+		move.w	IOS2_SRCADDR+4(a2),du_CurrentAddr+4(a3)
+;
+; initialize network hardware
+;
+		move.l	a6,-(sp)
+		move.l	dev_SysBase(a6),a6
+		lib	Disable
+
+		move.l	du_BoardAddr1(a3),a0
+
+		move.b	#CMDF_NODMA!CMDF_STOP,NIC_CR(a0) ; page 0, reset NIC
+		move.b	#%01001011,NIC_DCR(a0)	; fifo thres. 8, 68k byteorder
+
+		moveq	#0,d0
+		move.b	d0,NIC_RBCR0(a0)
+		move.b	d0,NIC_RBCR1(a0)
+
+		move.b	#%00000100,NIC_RCR(a0)	; accept broadcast
+
+		move.b	#%00000100,NIC_TCR(a0)	; loopback mode (for init)
+
+		move.b	du_PStart(a3),d0
+		move.b	d0,NIC_PSTART(a0)
+		move.b	d0,NIC_BNDRY(a0)
+		move.b	du_PStop(a3),NIC_PSTOP(a0)
+
+		move.b	#$ff,NIC_ISR(a0)	; clear interrupt status
+		move.b	#%00111111,NIC_IMR(a0)	; enable interrupts
+
+; select page 1
+		move.b	#CMDF_PAGE0!CMDF_NODMA!CMDF_STOP,NIC_CR(a0)
+
+		move.b	du_CurrentAddr(a3),NIC_PAR0(a0)
+		move.b	du_CurrentAddr+1(a3),NIC_PAR1(a0)
+		move.b	du_CurrentAddr+2(a3),NIC_PAR2(a0)
+		move.b	du_CurrentAddr+3(a3),NIC_PAR3(a0)
+		move.b	du_CurrentAddr+4(a3),NIC_PAR4(a0)
+		move.b	du_CurrentAddr+5(a3),NIC_PAR5(a0)
+
+; no need to initialize the multicast registers?
+		moveq	#-1,d0
+		move.b	d0,NIC_MAR0(a0)
+		move.b	d0,NIC_MAR1(a0)
+		move.b	d0,NIC_MAR2(a0)
+		move.b	d0,NIC_MAR3(a0)
+		move.b	d0,NIC_MAR4(a0)
+		move.b	d0,NIC_MAR5(a0)
+		move.b	d0,NIC_MAR6(a0)
+		move.b	d0,NIC_MAR7(a0)
+
+		move.b	du_PStart(a3),d0
+		addq.b	#1,d0
+		move.b	d0,NIC_CURR(a0)
+		move.b	d0,du_NextPkt(a3)
+
+		move.b	#CMDF_NODMA!CMDF_START,NIC_CR(a0) ; page 0, start
+
+		move.b	#0,NIC_TCR(a0)		; loopback mode off
+;
+; NIC is now ready for operation
+;
+
+		lib	Enable
+		move.l	(sp)+,a6
+
+		lea	du_LastStart+TV_SECS(a3),a0
+		lea	du_LastStart+TV_MICRO(a3),a1
+		lib	Intuition,CurrentTime
+		bset	#UNITB_ONLINE,UNIT_FLAGS(a3)
+		bra	TermIO
+
+already_configured
+		moveq	#S2ERR_BAD_STATE,d0
+		moveq	#S2WERR_IS_CONFIGURED,d1
+		bra	IOError
+
+config_bad_addr	moveq	#S2ERR_BAD_ADDRESS,d0
+		moveq	#0,d1
+		bclr	#UNITB_CONFIGURED,UNIT_FLAGS(a3)
+		bra	IOError
+
+
+;
+; S2_MULTICAST
+;
+; (parameters as in CMD_WRITE)
+;
+dev_Multicast
+		ifd	DEBUG
+		DMSG	<'S2_MULTICAST',LF>
+		endc
+
+		btst	#0,IOS2_DSTADDR(a2)
+		bne.s	do_write
+
+		moveq	#S2ERR_BAD_ADDRESS,d0
+		moveq	#S2WERR_BAD_MULTICAST,d1
+		bra	IOError
+
+;
+; S2_BROADCAST
+;
+; (parameters as in CMD_WRITE)
+;
+dev_Broadcast
+		ifd	DEBUG
+		DMSG	<'S2_BROADCAST',LF>
+		endc
+
+;
+; set IOS2_DSTADDR to ethernet broadcast address FF:FF:FF:FF:FF:FF
+;
+		moveq	#-1,d0
+		move.l	d0,IOS2_DSTADDR(a2)
+		move.w	d0,IOS2_DSTADDR+4(a2)
+		bra	do_write
+
+;
+; CMD_WRITE
+;
+; IOS2_FLAGS     -- SANA2IOB_RAW
+; IOS2_PACKETTYPE - type of packet to send
+; IOS2_DSTADDR    - destination address
+; IOS2_DATALENGTH - length of data to send
+; IOS2_DATA       - data to be sent
+;
+; (should probably check if the address is a destination multicast/broadcast)
+;
+; Add Check for too long/too short packets !!!!
+;
+dev_Write
+		ifd	DEBUG
+		DMSG	<'CMD_WRITE',LF>
+		endc
+
+do_write	btst	#UNITB_CONFIGURED,UNIT_FLAGS(a3)
+		beq	not_configured
+		btst	#UNITB_ONLINE,UNIT_FLAGS(a3)
+		beq	not_online
+
+		bclr	#SANA2IOB_QUICK,IO_FLAGS(a2)
+
+		move.l	a6,-(sp)
+		move.l	dev_SysBase(a6),a6
+		lib	Disable
+
+		bset	#UNITB_CURRENTTX,UNIT_FLAGS(a3)
+		bne.s	queue_write
+
+		lib	Enable
+		move.l	(sp)+,a6
+
+		ifd	DEBUG
+		DMSG	<'Immediate write',LF>
+		endc
+
+		move.l	a2,du_CurrentTxReq(a3)
+		bra	ActualSendPacket
+
+queue_write	bset	#IOB_QUEUED,IO_FLAGS(a2)
+		lea	du_TxQueue(a3),a0
+		move.l	a2,a1
+		lib	AddHead
+		lib	Enable
+
+		ifd	DEBUG
+		DMSG	<'Queued write',LF>
+		endc
+
+		move.l	(sp)+,a6
+		rts
+
+not_configured	move.b	#S2ERR_BAD_STATE,d0
+		move.b	#S2WERR_NOT_CONFIGURED,d1
+		bra	IOError
+
+not_online	move.b	#S2ERR_OUTOFSERVICE,d0
+		move.b	#S2WERR_UNIT_OFFLINE,d1
+		bra	IOError
+
+;
+; actually send a packet
+;
+; unit pointer in a3, iorequest in a2
+;
+ActualSendPacket
+		btst	#SANA2IOB_RAW,IO_FLAGS(a2)
+		bne.s	raw_packet
+
+ 		move.l	IOS2_DSTADDR(a2),du_TxBuff(a3)
+		move.w	IOS2_DSTADDR+4(a2),du_TxBuff+4(a3)
+		move.w	du_CurrentAddr(a3),du_TxBuff+6(a3)
+		move.l	du_CurrentAddr+2(a3),du_TxBuff+8(a3)
+		move.w	IOS2_PACKETTYPE+2(a2),du_TxBuff+12(a3)
+
+		move.l	IOS2_DATALENGTH(a2),d0
+		move.l	IOS2_DATA(a2),a1
+		lea	du_TxBuff+14(a3),a0
+		move.l	a2,-(sp)
+		move.l	IOS2_BUFFERMANAGEMENT(a2),a2
+		move.l	buffm_CopyFromBuff(a2),a2
+		jsr	(a2)
+		move.l	(sp)+,a2
+		tst.l	d0
+		beq	buffm_error
+		moveq	#14,d0
+		add.l	IOS2_DATALENGTH(a2),d0
+		bra.s	do_send_packet
+
+raw_packet	move.l	IOS2_DATALENGTH(a2),d0
+		move.l	IOS2_DATA(a2),a1
+		lea	du_TxBuff(a3),a0
+		move.l	a2,-(sp)
+		move.l	IOS2_BUFFERMANAGEMENT(a2),a2
+		move.l	buffm_CopyFromBuff(a2),a2
+		jsr	(a2)
+		move.l	(sp)+,a2
+		tst.l	d0
+		beq	buffm_error
+
+		move.l	IOS2_DATALENGTH(a2),d0
+
+do_send_packet
+		ifd	DEBUG
+		DMSG	<'Actually send packet, length = %ld',LF>
+		endc
+
+		move.w	d0,d1
+		addq.w	#3,d1
+		lsr.w	#2,d1		;# of longwords
+		lea	du_TxBuff(a3),a0
+		move.l	du_BoardAddr1(a3),a1		
+		bra.s	tx_copy_loop1
+
+tx_copy_loop	move.l	(a0)+,(a1)+
+tx_copy_loop1	dbf	d1,tx_copy_loop
+
+		moveq	#64,d1
+		cmp.l	d1,d0		;force minimum packet size to 64 bytes
+		bcc.s	1$		;(+CRC)
+		moveq	#64,d0
+
+1$		move.l	du_BoardAddr1(a3),a0
+		move.b	du_TPStart(a3),NIC_TPSR(a0)	;transmit page
+		move.b	d0,NIC_TBCR0(a0)		;transmit byte count low
+		lsr.w	#8,d0
+		move.b	d0,NIC_TBCR1(a0)		;transmit byte count high
+; send packet
+		move.b	#CMDF_NODMA!CMDF_TRANSMIT!CMDF_START,NIC_CR(a0)
+		rts
+
+buffm_error	clr.l	du_CurrentTxReq(a3)	;(not really necessary)
+		bclr	#UNITB_CURRENTTX,UNIT_FLAGS(a3)
+		move.b	#S2ERR_SOFTWARE,d0
+		move.b	#S2WERR_BUFF_ERROR,d1
+		bra	IOError
+
+;
+; Ethernet card interrupt routine
+;
+; IS_DATA is pointer to the device unit structure
+;
+NIC_IntRoutine	movem.l	a2/a3/a6,-(sp)
+		move.l	a1,a3
+		move.l	du_DevicePtr(a3),a6
+		move.l	du_BoardAddr1(a3),a0
+		moveq	#0,d0
+		move.b	NIC_ISR(a0),d0
+		and.b	#$3f,d0
+		beq	nic_int_continue	;next interrupt server
+
+		ifd	DEBUG
+		DMSG	<'Interrupt, ISR = $%lx',LF>
+		endc
+
+		btst	#1,d0
+		bne.s	transmit_ok
+		btst	#3,d0
+		bne.s	transmit_err
+
+		move.b	d0,NIC_ISR(a0)
+		bra	nic_int_ok		;!!!!
+
+transmit_err
+transmit_ok	and.b	#%1010,d0
+		move.b	d0,NIC_ISR(a0)		;clear interrupt
+
+		ifd	DEBUG
+		DMSG	<'Transmit complete interrupt (%lx)',LF>
+		endc
+
+		bclr	#UNITB_CURRENTTX,UNIT_FLAGS(a3)
+		beq.s	nic_int_ok	; should not happen
+
+; Set IO_ERROR/WIREERROR if an error has been detected
+; What is a good error number here??
+		btst	#3,d0
+		beq.s	1$
+		move.b	#S2ERR_NO_RESOURCES,IO_ERROR(a2)
+		bra.s	2$
+
+1$		addq.l	#1,du_PacketsSent(a3)
+
+;
+; do type tracking here !!
+;
+
+2$		move.l	du_CurrentTxReq(a3),a2
+		bsr	TermIO
+
+		lea	du_TxQueue(a3),a0
+		lib	Exec,RemTail
+		move.l	d0,du_CurrentTxReq(a3)
+		beq.s	nic_int_ok
+
+		move.l	d0,a2
+		bclr	#IOB_QUEUED,IO_FLAGS(a2)
+
+		bsr	ActualSendPacket
+
+nic_int_ok	moveq	#1,d0
+		bra.s	nic_int_end
+
+nic_int_continue
+		moveq	#0,d0
+
+nic_int_end	movem.l	(sp)+,a2/a3/a6
+		rts
+
+;;;;
+		ifd	DEBUG
+;
+; Printf-like formatting with output to serial port (with RawPutChar)
+; format string in a0, arguments in d0-d7
+;
+DPrintf		movem.l	a2/a3/a6,-(sp)
+		movem.l	d0-d7,-(sp)
+		move.l	sp,a1
+		lea	PutCh(pc),a2
+		move.l	4,a6
+		move.l	a6,a3
+		lib	RawDoFmt
+		lea	8*4(sp),sp
+		movem.l	(sp)+,a2/a3/a6
+		rts
+
+PutCh		move.l	a6,-(sp)
+		move.l	a3,a6
+		lib	RawPutChar
+		move.l	(sp)+,a6
+		rts
+
+		endc	;DEBUG
+
+dev_endskip
+
+		end
