@@ -26,6 +26,8 @@ EADDR_BYTES	equ	6
 		 STRUCT	du_TxQueue,MLH_SIZE
 		 STRUCT	du_RxQueue,MLH_SIZE
 		 STRUCT	du_RxOrphanQueue,MLH_SIZE
+		 STRUCT	du_MultiCastList,MLH_SIZE
+		 STRUCT	du_MultiCastBitUseCount,2*64
 		 APTR	du_CurrentTxReq
 		 UBYTE	du_PStart		;receive buffer start page
 		 UBYTE	du_PStop		;receive buffer end page
@@ -40,6 +42,8 @@ EADDR_BYTES	equ	6
 		 ULONG	du_Overruns
 		 ULONG	du_SoftMisses
 		 ULONG	du_UnknownTypesReceived
+		 ULONG	du_Reconfigurations
+		 ULONG	du_BadMultiCastFilterCount
 		 STRUCT	du_LastStart,TV_SIZE
 		 STRUCT	du_TxBuff,PACKETBUFSIZE
 		 STRUCT	du_RxBuff,PACKETBUFSIZE
@@ -54,6 +58,15 @@ EADDR_BYTES	equ	6
 ; an extra IORequest flag
 ;
 		BITDEF	IO,QUEUED,2
+
+;
+; multicast address node
+;
+		STRUCTURE MultiCastAddress,MLN_SIZE
+		 STRUCT	mca_Addr,EADDR_BYTES
+		 UWORD	mca_BitNum
+		 ULONG	mca_UseCount
+		LABEL mca_Sizeof
 
 ;
 ; Buffer management 'magic cookie'

@@ -21,14 +21,17 @@
 ;
 
 ;
-; multicast receive, type stats, special stats and events are
-; not implemented yet. not all global stats are properly updated.
+; type stats, special stats and events are not implemented yet.
+; not all global stats are properly updated.
 ; does not handle receive buffer ring overflow.
 ;
 ; receive & transmit work (but not perfectly...)
 ;
+; receive should check if several packets are received and only one
+; interrupt generated...
+;
 
-DEBUG		set	1
+;DEBUG		set	1
 
 ;;;
 		nolist
@@ -57,9 +60,11 @@ DEBUG		set	1
 
 		include	'macros.i'
 
+		xref	multicast_hash		;exported from hash.a
+
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	3
+DEV_REVISION	equ	6
 
 ;
 ; start of the first hunk of the device file
@@ -86,7 +91,7 @@ dev_idstring	dc.b	'hydradev '
 		StrNumber DEV_VERSION
 		dc.b	'.'
 		StrNumber DEV_REVISION
-		dc.b	' (7.11.92)',CR,LF,0
+		dc.b	' (17.11.92)',CR,LF,0
 
 copyright_msg	dc.b	'Copyright © 1992 by Bits & Chips Oy, Finland',CR,LF,0
 
@@ -156,13 +161,13 @@ dev_InitRoutine	move.l	a4,-(sp)
 		moveq	#0,d0
 		lib	OpenLibrary
 		move.l	d0,dev_ExpansionBase(a4)
-		beq.s	initfail1
+		beq.b	initfail1
 
 		lea	intuition_name(pc),a1
 		moveq	#0,d0
 		lib	OpenLibrary
 		move.l	d0,dev_IntuitionBase(a4)
-		beq.s	initfail2
+		beq.b	initfail2
 
 		move.l	a4,d0
 		move.l	(sp)+,a4
@@ -209,18 +214,18 @@ dev_Open	movem.l	d2/d3/a2/a3,-(sp)
 		move.l	d0,d2
 		lsl.l	#2,d2
 		move.l	dev_UnitTable(a6,d2.l),d0
-		bne.s	unit_ok
+		bne.b	unit_ok
 
 		move.l	d2,d0
 		bsr	Initialize_Unit
 		tst.l	d0
-		beq.s	open_fail
+		beq.b	open_fail
 
 		move.l	d0,dev_UnitTable(a6,d2.l)
 
 unit_ok		move.l	d0,a3
 		tst.w	UNIT_OPENCNT(a3)
-		beq.s	excl_ok1
+		beq.b	excl_ok1
 		btst	#SANA2OPB_MINE,d3
 		bne	excl_open_fail
 
@@ -228,13 +233,13 @@ excl_ok1	btst	#UNITB_EXCLUSIVE,UNIT_FLAGS(a3)
 		bne	excl_open_fail
 
 		btst	#SANA2OPB_MINE,d3
-		beq.s	excl_ok2
+		beq.b	excl_ok2
 		bset	#UNITB_EXCLUSIVE,UNIT_FLAGS(a3)
 
 excl_ok2	move.l	IOS2_BUFFERMANAGEMENT(a2),a1
 		bsr	InitBuffManagement
 		move.l	d0,IOS2_BUFFERMANAGEMENT(a2)
-		beq.s	open_fail
+		beq.b	open_fail
 
 		move.l	a3,IO_UNIT(a2)
 		addq.w	#1,UNIT_OPENCNT(a3)
@@ -262,10 +267,10 @@ open_err	moveq	#-1,d1
 		DMSG	<'Device open failed, error %ld',LF>
 		endc
 
-		bra.s	open_exit
+		bra.b	open_exit
 
 excl_open_fail	moveq	#IOERR_UNITBUSY,d0
-		bra.s	open_err
+		bra.b	open_err
 
 ;
 ; Device close routine
@@ -292,17 +297,17 @@ dev_Close	movem.l	a2/a3,-(sp)
 		move.l	d0,IO_UNIT(a2)
 
 		move.l	IOS2_BUFFERMANAGEMENT(a2),a1
-		move.l	#buffm_Sizeof,d0
+		moveq	#buffm_Sizeof,d0
 		lib	Exec,FreeMem
 
 		subq.w	#1,UNIT_OPENCNT(a3)
 
 		moveq	#0,d0
 		subq.w	#1,LIB_OPENCNT(a6)
-		bne.s	close_end
+		bne.b	close_end
 		btst	#LIBB_DELEXP,LIB_FLAGS(a6)
-		beq.s	close_end
-		bsr.s	dev_Expunge
+		beq.b	close_end
+		bsr.b	dev_Expunge
 
 close_end	movem.l	(sp)+,a2/a3
 		rts
@@ -317,7 +322,7 @@ close_end	movem.l	(sp)+,a2/a3
 ;   d0  -  seglist if device no longer in use, else zero
 ;
 dev_Expunge	tst.w	LIB_OPENCNT(a6)
-		beq.s	do_expunge
+		beq.b	do_expunge
 
 		or.b	#LIBF_DELEXP,LIB_FLAGS(a6)	;delayed expunge
 		moveq	#0,d0
@@ -338,7 +343,7 @@ unit_expunge_loop
 		move.l	d3,d2
 		lsl.l	#2,d2
 		move.l	dev_UnitTable(a6,d2.l),d0
-		beq.s	unit_expunge_next
+		beq.b	unit_expunge_next
 
 		move.l	d0,a1
 		bsr	Expunge_Unit
@@ -388,7 +393,7 @@ InitBuffManagement
 		DMSG	<'InitBuffManagement entry, taglist = $%lx',LF>
 		endc
 
-		move.l	#buffm_Sizeof,d0
+		moveq	#buffm_Sizeof,d0
 		move.l	#MEMF_PUBLIC,d1
 		lib	Exec,AllocMem
 		tst.l	d0
@@ -400,37 +405,37 @@ InitBuffManagement
 		move.l	a0,buffm_CopyFromBuff(a3)
 
 		move.l	a2,d0
-		beq.s	initbuffm_ok
+		beq.b	initbuffm_ok
 
 buffm_tag_loop	move.l	(a2)+,d0
-		beq.s	initbuffm_ok	;TAG_DONE == 0
+		beq.b	initbuffm_ok	;TAG_DONE == 0
 
 		cmp.l	#S2_COPYTOBUFF,d0
-		bne.s	1$
+		bne.b	1$
 		move.l	(a2)+,buffm_CopyToBuff(a3)
-		bra.s	buffm_tag_loop
+		bra.b	buffm_tag_loop
 
 1$		cmp.l	#S2_COPYFROMBUFF,d0
-		bne.s	2$
+		bne.b	2$
 		move.l	(a2)+,buffm_CopyFromBuff(a3)
-		bra.s	buffm_tag_loop
+		bra.b	buffm_tag_loop
 
 2$		subq.l	#TAG_IGNORE,d0
-		bne.s	3$
+		bne.b	3$
 
 55$		addq.l	#4,a2
-		bra.s	buffm_tag_loop
+		bra.b	buffm_tag_loop
 
 3$		subq.l	#TAG_MORE-TAG_IGNORE,d0
-		bne.s	4$
+		bne.b	4$
 
 		move.l	(a2),a2
-		bra.s	buffm_tag_loop
+		bra.b	buffm_tag_loop
 
 4$		subq.l	#TAG_SKIP-TAG_MORE,d0
-		bne.s	55$
+		bne.b	55$
 		addq.l	#8,a2
-		bra.s	55$
+		bra.b	55$
 
 initbuffm_ok
 		ifd	DEBUG
@@ -482,10 +487,10 @@ find_board_loop
 		tst.l	d0
 		beq	init_unit_exit
 		tst.l	d3
-		beq.s	found_board
+		beq.b	found_board
 		subq.l	#1,d3
 		move.l	d0,a0
-		bra.s	find_board_loop
+		bra.b	find_board_loop
 
 found_board	move.l	d0,a2
 		bclr	#CDB_CONFIGME,cd_Flags(a2)
@@ -507,12 +512,12 @@ found_board	move.l	d0,a2
 ram_size_loop	move.w	d0,0(a0,d3)
 		move.w	d1,2(a0,d3)
 		cmp.w	0(a0,d3),d0
-		bne.s	ram_end
+		bne.b	ram_end
 		cmp.w	2(a0,d3),d1
-		bne.s	ram_end
+		bne.b	ram_end
 		add.w	#$100,d3
 		cmp.w	#$7f00,d3
-		bcs.s	ram_size_loop
+		bcs.b	ram_size_loop
 		bra	ram_error
 
 ram_end
@@ -593,6 +598,9 @@ get_def_addr_loop
 		lea	du_RxOrphanQueue(a3),a0
 		NEWLIST	a0
 
+		lea	du_MultiCastList(a3),a0
+		NEWLIST	a0
+
 init_unit_ok	move.l	a3,d0
 
 init_unit_exit
@@ -607,7 +615,7 @@ ram_error
 init_unit_alloc_fail
 		bset	#CDB_CONFIGME,cd_Flags(a2)
 		moveq	#0,d0
-		bra.s	init_unit_exit
+		bra.b	init_unit_exit
 ;
 ; Unit expunge routine
 ;
@@ -668,7 +676,7 @@ dev_BeginIO	movem.l	a2/a3,-(sp)
 
 		move.w	IO_COMMAND(a2),d0
 		cmp.w	#S2_END,d0
-		bcc.s	invalid_cmd
+		bcc.b	invalid_cmd
 
 		add.w	d0,d0	; d0 *= 2
 		lea	dev_CmdTable(pc),a0
@@ -692,19 +700,21 @@ IOError		move.b	d0,IO_ERROR(a2)
 ;
 TermIO
 		ifd	DEBUG
-		move.l	d2,-(sp)
+		movem.l	d2/d3,-(sp)
 		move.l	a2,d0
 		moveq	#0,d1
 		move.w	IO_COMMAND(a2),d1
 		moveq	#0,d2
 		move.b	IO_ERROR(a2),d2
-		DMSG	<'TermIO, req = $%lx, cmd = $%lx, err = $%lx',LF>
-		move.l	(sp)+,d2
+		moveq	#0,d3
+		move.b	IO_FLAGS(a2),d3
+		DMSG	<'TermIO, req = $%lx, cmd = $%lx, err = $%lx, flags = %lx',LF>
+		movem.l	(sp)+,d2/d3
 		endc
 
 		move.l	a2,a1
 		btst	#SANA2IOB_QUICK,IO_FLAGS(a1)
-		bne.s	termio_exit
+		bne.b	termio_exit
 		lib	Exec,ReplyMsg
 termio_exit	rts
 
@@ -724,20 +734,20 @@ dev_AbortIO	movem.l	a2/a3,-(sp)
 
 		move.w	IO_COMMAND(a2),d0
 		cmp.w	#CMD_WRITE,d0
-		beq.s	abort_write
+		beq.b	abort_write
 		cmp.w	#S2_MULTICAST,d0
-		beq.s	abort_write
+		beq.b	abort_write
 		cmp.w	#S2_BROADCAST,d0
-		beq.s	abort_write
+		beq.b	abort_write
 
 		cmp.w	#CMD_READ,d0
-		beq.s	abort_read
+		beq.b	abort_read
 		cmp.w	#S2_READORPHAN,d0
-		bne.s	AbortIO_End
+		bne.b	AbortIO_End
 
 abort_read
 abort_write	bclr	#IOB_QUEUED,IO_FLAGS(a2)
-		beq.s	AbortIO_End
+		beq.b	AbortIO_End
 
 		move.l	a2,a1
 		lib	Exec,Remove
@@ -777,39 +787,39 @@ Abort_All	movem.l	d2/a2/a6,-(sp)
 		move.l	du_TxQueue+MLH_HEAD(a3),a2
 
 abort_tx_loop	move.l	(a2),d2
-		beq.s	all_tx_aborted
+		beq.b	all_tx_aborted
 
 		move.b	#IOERR_ABORTED,IO_ERROR(a2)
 		move.l	a2,a1
 		lib	ReplyMsg
 
 		move.l	d2,a2
-		bra.s	abort_tx_loop
+		bra.b	abort_tx_loop
 
 all_tx_aborted	move.l	du_RxQueue+MLH_HEAD(a3),a2
 
 abort_rx_loop	move.l	(a2),d2
-		beq.s	all_rx_aborted
+		beq.b	all_rx_aborted
 
 		move.b	#IOERR_ABORTED,IO_ERROR(a2)
 		move.l	a2,a1
 		lib	ReplyMsg
 
 		move.l	d2,a2
-		bra.s	abort_rx_loop
+		bra.b	abort_rx_loop
 
 all_rx_aborted	move.l	du_RxOrphanQueue+MLH_HEAD(a3),a2
 
 abort_orphan_loop
 		move.l	(a2),d2
-		beq.s	all_orphans_aborted
+		beq.b	all_orphans_aborted
 
 		move.b	#IOERR_ABORTED,IO_ERROR(a2)
 		move.l	a2,a1
 		lib	ReplyMsg
 
 		move.l	d2,a2
-		bra.s	abort_orphan_loop
+		bra.b	abort_orphan_loop
 
 all_orphans_aborted
 		lea	du_TxQueue(a3),a0
@@ -824,6 +834,11 @@ all_orphans_aborted
 ; (it was a looong Disable() ... really shouldn't do that...)
 ;
 		lib	Enable
+
+		ifd	DEBUG
+		DMSG	<'Abort_All complete',LF>
+		endc
+
 		movem.l	(sp)+,d2/a2/a6
 		rts
 
@@ -848,8 +863,8 @@ dev_CmdTable	dev_cmd	invalid_cmd		;CMD_INVALID
 		dev_cmd	dev_ConfigInterface	;S2_CONFIGINTERFACE
 		dev_cmd	invalid_cmd		;reserved
 		dev_cmd	invalid_cmd		;reserved
-		dev_cmd	invalid_cmd		;S2_ADDMULTICASTADDRESS (not imple-
-		dev_cmd	invalid_cmd		;S2_DELMULTICASTADDRESS mented yet)
+		dev_cmd	dev_AddMultiCast	;S2_ADDMULTICASTADDRESS
+		dev_cmd	dev_DelMultiCast	;S2_DELMULTICASTADDRESS
 		dev_cmd	dev_Multicast		;S2_MULTICAST
 		dev_cmd	dev_Broadcast		;S2_BROADCAST
 		dev_cmd	invalid_cmd		;S2_TRACKTYPE	  (not
@@ -857,10 +872,249 @@ dev_CmdTable	dev_cmd	invalid_cmd		;CMD_INVALID
 		dev_cmd	invalid_cmd		;S2_GETTYPESTATS  yet
 		dev_cmd	invalid_cmd		;S2_GETSPECIALSTATS )
 		dev_cmd	dev_GetGlobalStats	;S2_GETGLOBALSTATS
-		dev_cmd	invalid_cmd		;S2_ONEVEN  (not implemented yet)
+		dev_cmd	invalid_cmd		;S2_ONEVENT  (not implemented yet)
 		dev_cmd	dev_ReadOrphan		;S2_READORPHAN
 		dev_cmd	dev_OnLine		;S2_ONLINE
 		dev_cmd	dev_OffLine		;S2_OFFLINE
+
+;
+; S2_ADDMULTICASTADDRESS
+;
+; IOS2_SRCADDR  --  Multicast address to add
+;
+dev_AddMultiCast
+		ifd	DEBUG
+		DMSG	<'S2_ADDMULTICASTADDRESS',LF>
+		endc
+
+		btst	#0,IOS2_SRCADDR(a2)
+		beq	bad_multicast_addr
+
+		lib	Exec,Forbid
+		lea	IOS2_SRCADDR(a2),a0
+		bsr	find_multicast
+		tst.l	d0
+		bne	add_multi_1
+;
+; allocate a new multicast node
+;
+		moveq	#mca_Sizeof,d0
+		move.l	#MEMF_CLEAR!MEMF_PUBLIC,d1
+		lib	Exec,AllocMem
+		tst.l	d0
+		beq	out_of_memory
+		move.l	d0,a1
+
+		ifd	DEBUG
+		DMSG	<'New multicast address, node = $%lx,'>
+		endc
+
+		move.l	IOS2_SRCADDR(a2),mca_Addr(a1)
+		move.w	IOS2_SRCADDR+4(a2),mca_Addr+4(a1)
+
+		lea	IOS2_SRCADDR(a2),a0
+		bsr	multicast_hash		;this doesn't trash a1
+		move.w	d0,mca_BitNum(a1)
+
+		ifd	DEBUG
+		DMSG	<' bitnum = %ld',LF>
+		endc
+
+		add.w	d0,d0
+		lea	du_MultiCastBitUseCount(a3),a0
+		add.w	d0,a0
+		addq.w	#1,(a0)
+
+		ifd	DEBUG
+		moveq	#0,d0
+		move.w	(a0),d0
+		DMSG	<'BitNum usecount = %ld',LF>
+		endc
+
+		cmp.w	#1,(a0)
+		bhi.b	add_multi_2
+
+		move.w	mca_BitNum(a1),d0
+		move.w	d0,d1
+		lsr.w	#3,d1
+		add.w	d1,d1	; * 2
+		move.l	du_BoardAddr1(a3),a0
+		lea	NIC_MAR0(a0),a0
+		add.w	d1,a0
+
+		ifd	DEBUG
+		movem.l	d0/d1,-(sp)
+		move.l	a0,d1
+		and.l	#7,d0
+		DMSG	<'set bit #%ld at addr $%lx',LF>
+		movem.l	(sp)+,d0/d1
+		endc
+;
+; changing to page 1 inside Disable()/Enable() is safe
+; (writing 0 to TXP has no effect, and this doesn't use remote DMA)
+;
+		movem.l	a2/a6,-(sp)
+		move.l	dev_SysBase(a6),a6
+		lib	Disable
+		move.l	du_BoardAddr1(a3),a2
+		move.b	#CRF_PAGE0!CRF_NODMA!CRF_START,NIC_CR(a2)
+		bset	d0,(a0)
+		move.b	#CRF_NODMA!CRF_START,NIC_CR(a2)
+		lib	Enable
+		movem.l	(sp)+,a2/a6
+
+add_multi_2	move.l	a1,-(sp)
+		lea	du_MultiCastList(a3),a0
+		lib	Exec,AddTail
+		move.l	(sp)+,a1
+
+add_multi_1	addq.l	#1,mca_UseCount(a1)
+
+		ifd	DEBUG
+		move.l	mca_UseCount(a1),d0
+		DMSG	<'Multicast addr usecount = %ld',LF>
+		endc
+
+		lib	Exec,Permit
+		bra	TermIO
+
+out_of_memory	lib	Exec,Permit
+		moveq	#S2ERR_NO_RESOURCES,d0
+		moveq	#S2WERR_MULTICAST_FULL,d1
+		bra	IOError
+
+;
+; S2_DELMULTICASTADDRESS
+;
+dev_DelMultiCast
+		ifd	DEBUG
+		DMSG	<'S2_DELMULTICASTADDRESS',LF>
+		endc
+
+		btst	#0,IOS2_SRCADDR(a2)
+		beq	bad_multicast_addr
+
+		move.l	a6,-(sp)
+		move.l	dev_SysBase(a6),a6
+		lib	Forbid
+		lea	IOS2_SRCADDR(a2),a0
+		bsr	find_multicast
+		tst.l	d0
+		beq	delmulti_1
+		move.l	d0,a1
+
+		ifd	DEBUG
+		move.l	mca_UseCount(a1),d1
+		DMSG	<'Remove multicast addr, node = $%lx, Usecount = %ld',LF>
+		endc
+
+		subq.l	#1,mca_UseCount(a1)
+		bne	delmulti_0
+
+		move.w	mca_BitNum(a1),d0
+
+		ifd	DEBUG
+		ext.l	d0
+		DMSG	<'Multicast bitnum = %ld',LF>
+		endc
+
+		add.w	d0,d0
+		lea	du_MultiCastBitUseCount(a3),a0
+		add.w	d0,a0
+
+		ifd	DEBUG
+		moveq	#0,d0
+		move.w	(a0),d0
+		DMSG	<'Multicast bit use count = %ld',LF>
+		endc
+
+		subq.w	#1,(a0)
+		bne.b	delmulti_b1
+
+		move.w	mca_BitNum(a1),d0
+		move.w	d0,d1
+		lsr.w	#3,d1
+		move.l	du_BoardAddr1(a3),a0
+		add.w	d1,d1	; * 2
+		lea	NIC_MAR0(a0),a0
+		add.w	d1,a0
+
+		ifd	DEBUG
+		movem.l	d0/d1,-(sp)
+		move.l	a0,d1
+		and.l	#7,d0
+		DMSG	<'clear bit #%ld at addr $%lx',LF>
+		movem.l	(sp)+,d0/d1
+		endc
+
+		move.l	a2,-(sp)
+		lib	Disable
+		move.l	du_BoardAddr1(a3),a2
+		move.b	#CRF_PAGE0!CRF_NODMA!CRF_START,NIC_CR(a2)
+		bclr	d0,(a0)
+		move.b	#CRF_NODMA!CRF_START,NIC_CR(a2)
+		lib	Enable
+		move.l	(sp)+,a2
+
+delmulti_b1	move.l	a1,-(sp)
+		lib	Remove
+		move.l	(sp)+,a1
+		moveq	#mca_Sizeof,d0
+		lib	FreeMem
+
+delmulti_0	moveq	#1,d0
+
+delmulti_1	lib	Permit		;this doesn't trash any registers
+		move.l	(sp)+,a6
+		tst.l	d0
+		beq	bad_multicast_addr
+		bra	TermIO
+
+;
+; find a given multicast address from the multicast address list
+;
+; pointer to address in a0, pointer to unit in a3
+;
+; returns zero in d0 if not found,
+; pointer to multicast address node in d0/a1 if found.
+;
+find_multicast
+		ifd	DEBUG
+		DMSG	<'find_multicast',LF>
+		endc
+
+		move.l	du_MultiCastList+MLH_HEAD(a3),a1
+
+find_multicast_loop
+		move.l	(a1),d1
+		beq.b	multicast_not_found
+
+		move.l	mca_Addr(a1),d0
+		cmp.l	(a0),d0
+		bne.b	find_multicast_next
+		move.w	mca_Addr+4(a1),d0
+		cmp.w	4(a0),d0
+		beq.b	found_multicast
+
+find_multicast_next
+		move.l	d1,a1
+		bra.b	find_multicast_loop
+
+found_multicast	move.l	a1,d0
+
+		ifd	DEBUG
+		DMSG	<'multicast found, node = $%lx',LF>
+		endc
+
+		rts
+
+multicast_not_found
+		ifd	DEBUG
+		DMSG	<'multicast not found',LF>
+		endc
+
+		moveq	#0,d0
+		rts
 
 ;
 ; CMD_FLUSH
@@ -918,11 +1172,11 @@ dev_DeviceQuery
 		endc
 
 		move.l	IOS2_STATDATA(a2),d0
-		beq.s	null_pointer
+		beq.b	null_pointer
 
 		move.l	d0,a1
 		cmp.l	#S2DQ_SIZE,S2DQ_SIZEAVAILABLE(a1)
-		bcs.s	devquery_not_enough_space
+		bcs.b	devquery_not_enough_space
 
 		addq.l	#4,a1
 		lea	DevQueryData(pc),a0
@@ -995,9 +1249,8 @@ dev_GetGlobalStats
 		move.l	du_BadPackets(a3),S2DS_BADDATA(a5)
 		move.l	du_Overruns(a3),S2DS_OVERRUNS(a5)
 		move.l	du_SoftMisses(a3),S2DS_SOFTMISSES(a5)
-		move.l	du_UnknownTypesReceived(a3),S2DS_RECONFIGURATIONS(a5)
-		moveq	#1,d0
-		move.l	d0,S2DS_RECONFIGURATIONS(a5)
+		move.l	du_UnknownTypesReceived(a3),S2DS_UNKNOWNTYPESRECEIVED(a5)
+		move.l	du_Reconfigurations(a3),S2DS_RECONFIGURATIONS(a5)
 		move.l	du_LastStart+TV_SECS(a3),S2DS_LASTSTART+TV_SECS(a5)
 		move.l	du_LastStart+TV_MICRO(a3),S2DS_LASTSTART+TV_MICRO(a5)
 
@@ -1046,7 +1299,8 @@ dev_ConfigInterface
 		move.b	d0,NIC_RBCR0(a0)
 		move.b	d0,NIC_RBCR1(a0)
 
-		move.b	#RCRF_AB,NIC_RCR(a0)	; accept broadcast
+; accept broadcast & multicast
+		move.b	#RCRF_AB!RCRF_AM,NIC_RCR(a0)
 
 		move.b	#TCRF_LB1,NIC_TCR(a0)	; loopback mode (for init)
 
@@ -1100,6 +1354,7 @@ dev_ConfigInterface
 		lea	du_LastStart+TV_MICRO(a3),a1
 		lib	Intuition,CurrentTime
 		bset	#UNITB_ONLINE,UNIT_FLAGS(a3)
+		addq.l	#1,du_Reconfigurations(a3)
 		bra	TermIO
 
 already_configured
@@ -1124,8 +1379,9 @@ dev_Multicast
 		endc
 
 		btst	#0,IOS2_DSTADDR(a2)
-		bne.s	do_write
+		bne.b	do_write
 
+bad_multicast_addr
 		moveq	#S2ERR_BAD_ADDRESS,d0
 		moveq	#S2WERR_BAD_MULTICAST,d1
 		bra	IOError
@@ -1158,8 +1414,7 @@ dev_Broadcast
 ; IOS2_DATA       - data to be sent
 ;
 ; (should probably check if the address is a destination multicast/broadcast)
-;
-; Add Check for too long/too short packets !!!!
+; (but Commodore a2065.device does not check either...)
 ;
 dev_Write
 		ifd	DEBUG
@@ -1181,7 +1436,7 @@ do_write	btst	#UNITB_CONFIGURED,UNIT_FLAGS(a3)
 		lib	Disable
 
 		bset	#UNITB_CURRENTTX,UNIT_FLAGS(a3)
-		bne.s	queue_write
+		bne.b	queue_write
 
 		lib	Enable
 		move.l	(sp)+,a6
@@ -1284,7 +1539,7 @@ dev_ReadOrphan
 ;
 ActualSendPacket
 		btst	#SANA2IOB_RAW,IO_FLAGS(a2)
-		bne.s	raw_packet
+		bne.b	raw_packet
 
  		move.l	IOS2_DSTADDR(a2),du_TxBuff(a3)
 		move.w	IOS2_DSTADDR+4(a2),du_TxBuff+4(a3)
@@ -1304,7 +1559,7 @@ ActualSendPacket
 		beq	buffm_error
 		moveq	#14,d0
 		add.l	IOS2_DATALENGTH(a2),d0
-		bra.s	do_send_packet
+		bra.b	do_send_packet
 
 raw_packet	move.l	IOS2_DATALENGTH(a2),d0
 		move.l	IOS2_DATA(a2),a1
@@ -1333,14 +1588,14 @@ do_send_packet
 		addq.w	#3,d1
 		lsr.w	#2,d1		;# of longwords
 		lea	du_TxBuff(a3),a0
-		bra.s	tx_copy_loop1
+		bra.b	tx_copy_loop1
 
 tx_copy_loop	move.l	(a0)+,(a1)+
 tx_copy_loop1	dbf	d1,tx_copy_loop
 
 		moveq	#64,d1
 		cmp.l	d1,d0		;force minimum packet size to 64 bytes
-		bcc.s	1$		;(+CRC)
+		bcc.b	1$		;(+CRC)
 		moveq	#64,d0
 
 1$		move.l	du_BoardAddr1(a3),a0
@@ -1382,15 +1637,17 @@ NIC_IntRoutine	movem.l	d2/a2/a3/a4/a6,-(sp)
 		bne	transmit_err
 
 		btst	#ISRB_PRX,d0
-		bne.s	receive_ok
+		bne.b	receive_ok
 		btst	#ISRB_RXE,d0
 		bne	receive_err
 
+;
+; handle all other interrupts here.
+;
 		move.b	d0,NIC_ISR(a4)
 		bra	nic_int_ok		;!!!!
 
-receive_ok	move.b	#ISRF_PRX,NIC_ISR(a4)
-
+receive_ok
 receive_packet	moveq	#0,d0
 		move.b	du_NextPkt(a3),d0
 		lsl.w	#8,d0
@@ -1422,10 +1679,50 @@ receive_packet	moveq	#0,d0
 		bhi	next_packet	; drop the packet if too long
 ; (probably should increment some statistics when dropping oversized packets)
 
+		ifd	DEBUG
+		move.l	4(a4),d0
+		moveq	#0,d1
+		move.w	4+4(a4),d1
+		DMSG	<'Dest. addr %08lx%04lx',LF>
+		endc
+
+		move.w	4(a4),d0	; (don't access card memory as bytes)
+		btst	#8,d0		; check multicast flag
+		beq	get_packet_type
+
+		ifd	DEBUG
+		DMSG	<'Multicast or broadcast',LF>
+		endc
+
+		moveq	#-1,d0		; check broadcast
+		cmp.l	4(a4),d0
+		bne.b	rec_multicast
+		cmp.w	4+4(a4),d0
+		beq	get_packet_type	; broadcast
 ;
-; Do multicast filtering here !!!
+; received a multicast packet. do filtering here
 ;
-		move.w	$10(a4),d0	; get packet type
+rec_multicast	ifd	DEBUG
+		DMSG	<'Received a multicast packet',LF>
+		endc
+
+		lea	4(a4),a0
+		bsr	find_multicast
+		tst.l	d0
+		bne.b	received_multicast_ok
+
+		addq.l	#1,du_BadMultiCastFilterCount(a3)
+		ifd	DEBUG
+		DMSG	<'Bad multicast filtering',LF>
+		endc
+		bra	next_packet
+
+received_multicast_ok
+		ifd	DEBUG
+		DMSG	<'Received multicast ok',LF>
+		endc
+
+get_packet_type	move.w	$10(a4),d0	; get packet type
 
 		ifd	DEBUG
 		ext.l	d0
@@ -1433,7 +1730,7 @@ receive_packet	moveq	#0,d0
 		endc
 
 		cmp.w	#1500,d0
-		bhi.s	find_ethernet_ioreq
+		bhi.b	find_ethernet_ioreq
 
 ;
 ; IEEE802.3 packet
@@ -1444,9 +1741,9 @@ find_ieee802_loop
 		move.l	(a2),d1
 		beq	orphan_packet
 		cmp.w	IOS2_PACKETTYPE+2(a2),d0
-		bcc.s	copy_rec_packet
+		bcc.b	copy_rec_packet
 		move.l	d1,a2
-		bra.s	find_ieee802_loop
+		bra.b	find_ieee802_loop
 
 find_ethernet_ioreq
 		move.l	du_RxQueue+MLH_HEAD(a3),a2
@@ -1455,9 +1752,9 @@ find_rec_ioreq_loop
 		move.l	(a2),d1
 		beq	orphan_packet
 		cmp.w	IOS2_PACKETTYPE+2(a2),d0
-		beq.s	copy_rec_packet
+		beq.b	copy_rec_packet
 		move.l	d1,a2
-		bra.s	find_rec_ioreq_loop
+		bra.b	find_rec_ioreq_loop
 
 ;
 ; copy packet to du_RxBuff
@@ -1494,7 +1791,7 @@ copy_rec_packet
 		ifd	DEBUG
 		DMSG	<'Receive copy1 length = $%lx longwords',LF>
 		endc
-		bra.s	rec_copy1_entry
+		bra.b	rec_copy1_entry
 
 rec_copy1_loop	move.l	(a0)+,(a1)+
 rec_copy1_entry	dbf	d0,rec_copy1_loop
@@ -1514,7 +1811,7 @@ rec_wrap
 		ifd	DEBUG
 		DMSG	<'Receive copy2 length = $%lx longwords',LF>
 		endc
-		bra.s	rec_copy2_entry
+		bra.b	rec_copy2_entry
 
 rec_copy2_loop	move.l	(a0)+,(a1)+
 rec_copy2_entry	dbf	d0,rec_copy2_loop
@@ -1525,6 +1822,7 @@ rec_copy2_entry	dbf	d0,rec_copy2_loop
 		add.w	d0,a0
 
 		ifd	DEBUG
+		move.l	a0,d0
 		DMSG	<'Wrap, continue at $%lx',LF>
 		endc
 
@@ -1536,7 +1834,7 @@ rec_copy2_entry	dbf	d0,rec_copy2_loop
 		ifd	DEBUG
 		DMSG	<'Receive copy3 length = $%lx longwords',LF>
 		endc
-		bra.s	rec_copy3_entry
+		bra.b	rec_copy3_entry
 
 rec_copy3_loop	move.l	(a0)+,(a1)+
 rec_copy3_entry	dbf	d0,rec_copy3_loop
@@ -1547,13 +1845,14 @@ packet_copied
 ;
 		moveq	#-1,d0
 		cmp.l	du_RxBuff(a3),d0
-		bne.s	1$
+		bne.b	1$
 		cmp.w	du_RxBuff+4(a3),d0
-		bne.s	1$
+		bne.b	1$
 		bset	#SANA2IOB_BCAST,IO_FLAGS(a2)
-1$
+1$		bra.b	2$
+
 		btst	#0,du_RxBuff(a3)
-		beq.s	2$
+		beq.b	2$
 		bset	#SANA2IOB_MCAST,IO_FLAGS(a2)
 2$
 		move.l	du_RxBuff(a3),IOS2_DSTADDR(a2)
@@ -1570,7 +1869,7 @@ packet_copied
 		lea	du_RxBuff+14(a3),a1
 		
 		btst	#SANA2IOB_RAW,IO_FLAGS(a2)
-		beq.s	3$
+		beq.b	3$
 
 		move.w	d2,d0
 		sub.w	#14,a1
@@ -1582,7 +1881,7 @@ packet_copied
 		jsr	(a2)
 		move.l	(sp)+,a2
 		tst.l	d0
-		bne.s	4$
+		bne.b	4$
 
 		move.b	#S2ERR_SOFTWARE,IO_ERROR(a2)
 		move.b	#S2WERR_BUFF_ERROR,IOS2_WIREERROR+3(a2)
@@ -1616,13 +1915,14 @@ next_packet	move.w	(a4),d0
 		lsr.w	#8,d0
 
 		ifd	DEBUG
+		ext.l	d0
 		DMSG	<'Next buffer page = $%lx',LF>
 		endc
 
 		move.b	d0,du_NextPkt(a3)
 		subq.b	#1,d0
 		cmp.b	du_PStart(a3),d0
-		bge.s	1$
+		bge.b	1$
 		move.b	du_PStop(a3),d0
 		subq.b	#1,d0
 1$		move.l	du_BoardAddr1(a3),a4
@@ -1633,9 +1933,18 @@ next_packet	move.w	(a4),d0
 		endc
 
 ;
-; should check here if there are any other packets in the receive ring !!!
+; check here if there are any other packets in the receive ring !!!
 ; (compare du_NextPkt and NIC_CURR...)
+; ... now tries to do it ...
 ;
+
+		move.b	#CRF_PAGE0!CRF_NODMA!CRF_START,NIC_CR(a4)	;page 1
+		move.b	NIC_CURR(a4),d0
+		move.b	#CRF_NODMA!CRF_START,NIC_CR(a4)	;page 0
+		cmp.b	du_NextPkt(a3),d0
+		bne	receive_packet
+
+		move.b	#ISRF_PRX,NIC_ISR(a4)
 		bra	nic_int_ok
 
 receive_err
@@ -1651,18 +1960,19 @@ transmit_ok	and.b	#%1010,d0
 		move.b	d0,NIC_ISR(a4)		;clear interrupt
 
 		ifd	DEBUG
-		DMSG	<'Transmit complete interrupt (%lx)',LF>
+		DMSG	<'Transmit complete interrupt ($%lx)',LF>
 		endc
 
 		bclr	#UNITB_CURRENTTX,UNIT_FLAGS(a3)
-		beq.s	nic_int_ok	; should not happen
+		beq.b	nic_int_ok	; should not happen
 
 ; Set IO_ERROR/WIREERROR if an error has been detected
 ; What is a good error number here??
 		btst	#3,d0
-		beq.s	1$
-		move.b	#S2ERR_NO_RESOURCES,IO_ERROR(a2)
-		bra.s	2$
+		beq.b	1$
+		move.l	du_CurrentTxReq(a3),a0
+		move.b	#S2ERR_NO_RESOURCES,IO_ERROR(a0)
+		bra.b	2$
 
 1$		addq.l	#1,du_PacketsSent(a3)
 
@@ -1676,15 +1986,19 @@ transmit_ok	and.b	#%1010,d0
 		lea	du_TxQueue(a3),a0
 		lib	Exec,RemTail
 		move.l	d0,du_CurrentTxReq(a3)
-		beq.s	nic_int_ok
+		beq.b	nic_int_ok
 
 		move.l	d0,a2
 		bclr	#IOB_QUEUED,IO_FLAGS(a2)
 
+		ifd	DEBUG
+		DMSG	<'Send from TxQueue',LF>
+		endc
+
 		bsr	ActualSendPacket
 
 nic_int_ok	moveq	#1,d0
-		bra.s	nic_int_end
+		bra.b	nic_int_end
 
 nic_int_continue
 		moveq	#0,d0

@@ -13,7 +13,7 @@ LNK = blink
 .a.o:
 	$(ASM) $(AOPTS) $*.a
 
-OBJ = hydradev.o
+OBJ = hydradev.o hash.o
 
 hydra.device:	$(OBJ)
 	$(LNK) from $(OBJ) to hydra.device
