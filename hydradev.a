@@ -5,7 +5,7 @@
 ;
 
 ;
-; WARNING: Very preliminary version!!
+; WARNING: Still preliminary version!!
 ;
 
 ;
@@ -15,22 +15,31 @@
 ;	- The C-include file devices/sana2.h (revision 1.10)
 ;	  has an error in the Sana2DeviceStats structure definition
 ;	  - SoftMisses-field is missing
+;	(SoftMisses has been replaced by an unused field in newer includes)
 ;
 ; (Disable/Enable should be replaced with routines that only disable/enable
 ; the PORTS/ExtLevel2 interrupt)
 ;
 
 ;
-; type stats, special stats and events are not implemented yet.
+; type stats are not implemented yet.
 ; not all global stats are properly updated.
-; does not handle receive buffer ring overflow.
 ;
-; receive & transmit work (but not perfectly...)
-;
-; receive should check if several packets are received and only one
-; interrupt generated...
+; 1.9 -- 1992-11-27
+;	- added buffer overflow check (untested)
+;	- trying to fix Abort_All
+; 1.10 - 1992-11-29
+;	- added S2_GETSPECIALSTATS
+; 1.11	- fixed AbortIO()
+;	- added S2_ONEVENT and event handling
+;	- fixed expunge
+; 1.12	- ...
 ;
 
+;
+; if DEBUG is defined, the device writes a lot of debugging
+; info to the serial port (with RawPutChar())
+;
 ;DEBUG		set	1
 
 ;;;
@@ -48,10 +57,12 @@
 		include	'utility/tagitem.i'
 		include	'libraries/configvars.i'
 		include	'hardware/intbits.i'
+		include	'hardware/cia.i'
 
 		include	'offsets.i'
 
 		include	'devices/sana2.i'
+		include	'devices/sana2specialstats.i'
 
 		list
 
@@ -59,12 +70,28 @@
 		include	'hydradev.i'
 
 		include	'macros.i'
+;
+Ciaa		equ	$bfe001
+;
 
+;
+; bit numbers for S2EVENT_xxx
+;
+		bitnum	S2EVENTB_ERROR,S2EVENT_ERROR
+		bitnum	S2EVENTB_TX,S2EVENT_TX
+		bitnum	S2EVENTB_RX,S2EVENT_RX
+		bitnum	S2EVENTB_ONLINE,S2EVENT_ONLINE
+		bitnum	S2EVENTB_OFFLINE,S2EVENT_OFFLINE
+		bitnum	S2EVENTB_BUFF,S2EVENT_BUFF
+		bitnum	S2EVENTB_HARDWARE,S2EVENT_HARDWARE
+		bitnum	S2EVENTB_SOFTWARE,S2EVENT_SOFTWARE
+
+;
 		xref	multicast_hash		;exported from hash.a
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	6
+DEV_REVISION	equ	12
 
 ;
 ; start of the first hunk of the device file
@@ -91,7 +118,7 @@ dev_idstring	dc.b	'hydradev '
 		StrNumber DEV_VERSION
 		dc.b	'.'
 		StrNumber DEV_REVISION
-		dc.b	' (17.11.92)',CR,LF,0
+		dc.b	' (29.11.92)',CR,LF,0
 
 copyright_msg	dc.b	'Copyright © 1992 by Bits & Chips Oy, Finland',CR,LF,0
 
@@ -363,6 +390,7 @@ unit_expunge_next
 		lib	CloseLibrary
 
 		move.l	dev_SegList(a4),d2
+		move.l	a4,a1
 		lib	Remove
 
 		move.l	a4,a1
@@ -383,6 +411,9 @@ unit_expunge_next
 ;
 ; Entry:
 ;   a1  -  buffer management taglist
+;
+; This does not use the 2.0+ utility.library taglist functions,
+; and it should also work on the 1.3 operating system.
 ;
 InitBuffManagement
 		movem.l	a2/a3,-(sp)
@@ -585,7 +616,6 @@ get_def_addr_loop
 		clr.b	du_TPStart(a3)
 		move.b	#8,du_PStart(a3)
 		move.b	d3,du_PStop(a3)
-
 ;
 ; initialize unit transmit/receive queues
 ;
@@ -596,6 +626,9 @@ get_def_addr_loop
 		NEWLIST	a0
 
 		lea	du_RxOrphanQueue(a3),a0
+		NEWLIST	a0
+
+		lea	du_EventList(a3),a0
 		NEWLIST	a0
 
 		lea	du_MultiCastList(a3),a0
@@ -640,11 +673,14 @@ Expunge_Unit	movem.l	a3/a6,-(sp)
 		move.b	#0,NIC_IMR(a0)			 ; disable all interrupts
 		move.b	#$ff,NIC_ISR(a0)		 ; clear all interrupts
 
+		btst	#UNITB_ONLINE,UNIT_FLAGS(a3)
+		beq.b	exp_unit_1
+
 		lea	du_NIC_Intr(a3),a1
 		moveq	#INTB_PORTS,d0
 		lib	RemIntServer
 
-		move.l	a3,a1
+exp_unit_1	move.l	a3,a1
 		move.l	du_ConfigDev(a3),a3
 		move.l	#du_Sizeof,d0
 		lib	FreeMem
@@ -664,7 +700,6 @@ dev_BeginIO	movem.l	a2/a3,-(sp)
 		move.l	a1,a2
 		move.b	#NT_MESSAGE,LN_TYPE(a2)		;LN_TYPE != NT_REPLYMSG
 		clr.b	IO_ERROR(a2)
-		clr.l	IOS2_WIREERROR(a2)
 		move.l	IO_UNIT(a2),a3
 
 		ifd	DEBUG
@@ -722,9 +757,8 @@ termio_exit	rts
 ; AbortIO routine
 ; a1  -  pointer to IORequest
 ;
-; (Note: S2_ONEVENT must be abortable when implemented..!!)
-;
-dev_AbortIO	movem.l	a2/a3,-(sp)
+dev_AbortIO	movem.l	d2/a2/a3,-(sp)
+		moveq	#IOERR_NOCMD,d2
 		move.l	a1,a2
 
 		ifd	DEBUG
@@ -733,6 +767,9 @@ dev_AbortIO	movem.l	a2/a3,-(sp)
 		endc
 
 		move.w	IO_COMMAND(a2),d0
+		cmp.w	#S2_ONEVENT,d0
+		beq.b	abort_onevent
+
 		cmp.w	#CMD_WRITE,d0
 		beq.b	abort_write
 		cmp.w	#S2_MULTICAST,d0
@@ -745,6 +782,7 @@ dev_AbortIO	movem.l	a2/a3,-(sp)
 		cmp.w	#S2_READORPHAN,d0
 		bne.b	AbortIO_End
 
+abort_onevent
 abort_read
 abort_write	bclr	#IOB_QUEUED,IO_FLAGS(a2)
 		beq.b	AbortIO_End
@@ -759,28 +797,31 @@ abort_write	bclr	#IOB_QUEUED,IO_FLAGS(a2)
 		moveq	#IOERR_ABORTED,d0
 		moveq	#0,d1
 		bsr	IOError
+		moveq	#0,d2
 
-AbortIO_End	movem.l	(sp)+,a2/a3
+AbortIO_End	move.l	d2,d0
+		movem.l	(sp)+,d2/a2/a3
 		rts
 
 ;
 ; Abort all pending requests, used by CMD_FLUSH and S2_OFFLINE
 ; A3  -  pointer to unit structure
 ; A6  -  pointer to device structure
+; D0  -  flag, if nonzero, aborts also S2_ONEVENT-commands.
 ; (this really should only disable PORTS interrupt...
 ; Disable()ing for this long a time surely affects serial receive...)
 ; (No request on any of the queues should have IOB_QUICK set)
 ;
 ; This doesn't abort the currently active transmit, if there is one
 ;
-; Should also abort events when they get implemented!!
-;
-Abort_All	movem.l	d2/a2/a6,-(sp)
+Abort_All	movem.l	d2/d3/a2/a6,-(sp)
+		move.l	d0,d3
 
 		ifd	DEBUG
 		DMSG	<'Abort_All',LF>
 		endc
 
+		move.l	a6,-(sp)
 		move.l	dev_SysBase(a6),a6
 		lib	Disable
 
@@ -789,6 +830,7 @@ Abort_All	movem.l	d2/a2/a6,-(sp)
 abort_tx_loop	move.l	(a2),d2
 		beq.b	all_tx_aborted
 
+		bclr	#IOB_QUEUED,IO_FLAGS(a2)
 		move.b	#IOERR_ABORTED,IO_ERROR(a2)
 		move.l	a2,a1
 		lib	ReplyMsg
@@ -796,11 +838,20 @@ abort_tx_loop	move.l	(a2),d2
 		move.l	d2,a2
 		bra.b	abort_tx_loop
 
-all_tx_aborted	move.l	du_RxQueue+MLH_HEAD(a3),a2
+all_tx_aborted
+		lea	du_TxQueue(a3),a0
+		NEWLIST	a0
+
+		ifd	DEBUG
+		DMSG	<'Transmit requests aborted',LF>
+		endc
+
+		move.l	du_RxQueue+MLH_HEAD(a3),a2
 
 abort_rx_loop	move.l	(a2),d2
 		beq.b	all_rx_aborted
 
+		bclr	#IOB_QUEUED,IO_FLAGS(a2)
 		move.b	#IOERR_ABORTED,IO_ERROR(a2)
 		move.l	a2,a1
 		lib	ReplyMsg
@@ -808,12 +859,21 @@ abort_rx_loop	move.l	(a2),d2
 		move.l	d2,a2
 		bra.b	abort_rx_loop
 
-all_rx_aborted	move.l	du_RxOrphanQueue+MLH_HEAD(a3),a2
+all_rx_aborted
+		lea	du_RxQueue(a3),a0
+		NEWLIST	a0
+
+		ifd	DEBUG
+		DMSG	<'Receive requests aborted',LF>
+		endc
+
+		move.l	du_RxOrphanQueue+MLH_HEAD(a3),a2
 
 abort_orphan_loop
 		move.l	(a2),d2
 		beq.b	all_orphans_aborted
 
+		bclr	#IOB_QUEUED,IO_FLAGS(a2)
 		move.b	#IOERR_ABORTED,IO_ERROR(a2)
 		move.l	a2,a1
 		lib	ReplyMsg
@@ -822,24 +882,50 @@ abort_orphan_loop
 		bra.b	abort_orphan_loop
 
 all_orphans_aborted
-		lea	du_TxQueue(a3),a0
-		NEWLIST	a0
-
-		lea	du_RxQueue(a3),a0
-		NEWLIST	a0
-
 		lea	du_RxOrphanQueue(a3),a0
 		NEWLIST	a0
+
+		ifd	DEBUG
+		DMSG	<'ReadOrphan requests aborted',LF>
+		endc
+
+		tst.l	d3
+		beq.b	abort_all_done
+
+		move.l	du_EventList+MLH_HEAD(a3),a2
+
+abort_event_loop
+		move.l	(a2),d2
+		beq.b	all_events_aborted
+
+		bclr	#IOB_QUEUED,IO_FLAGS(a2)
+		move.b	#IOERR_ABORTED,IO_ERROR(a2)
+		move.l	a2,a1
+		lib	ReplyMsg
+
+		move.l	d2,a2
+		bra.b	abort_event_loop
+
+all_events_aborted
+		ifd	DEBUG
+		DMSG	<'OnEvent requests aborted',LF>
+		endc
+
+		lea	du_EventList(a3),a0
+		NEWLIST	a0
+
+abort_all_done
 ;
 ; (it was a looong Disable() ... really shouldn't do that...)
 ;
 		lib	Enable
+		move.l	(sp)+,a6
 
 		ifd	DEBUG
 		DMSG	<'Abort_All complete',LF>
 		endc
 
-		movem.l	(sp)+,d2/a2/a6
+		movem.l	(sp)+,d2/d3/a2/a6
 		rts
 
 ;
@@ -869,10 +955,10 @@ dev_CmdTable	dev_cmd	invalid_cmd		;CMD_INVALID
 		dev_cmd	dev_Broadcast		;S2_BROADCAST
 		dev_cmd	invalid_cmd		;S2_TRACKTYPE	  (not
 		dev_cmd	invalid_cmd		;S2_UNTRACKTYPE   implemented
-		dev_cmd	invalid_cmd		;S2_GETTYPESTATS  yet
-		dev_cmd	invalid_cmd		;S2_GETSPECIALSTATS )
+		dev_cmd	invalid_cmd		;S2_GETTYPESTATS  yet)
+		dev_cmd	dev_GetSpecialStats	;S2_GETSPECIALSTATS
 		dev_cmd	dev_GetGlobalStats	;S2_GETGLOBALSTATS
-		dev_cmd	invalid_cmd		;S2_ONEVENT  (not implemented yet)
+		dev_cmd	dev_OnEvent		;S2_ONEVENT
 		dev_cmd	dev_ReadOrphan		;S2_READORPHAN
 		dev_cmd	dev_OnLine		;S2_ONLINE
 		dev_cmd	dev_OffLine		;S2_OFFLINE
@@ -886,6 +972,11 @@ dev_AddMultiCast
 		ifd	DEBUG
 		DMSG	<'S2_ADDMULTICASTADDRESS',LF>
 		endc
+
+		btst	#UNITB_CONFIGURED,UNIT_FLAGS(a3)
+		beq	not_configured
+		btst	#UNITB_ONLINE,UNIT_FLAGS(a3)
+		beq	not_online
 
 		btst	#0,IOS2_SRCADDR(a2)
 		beq	bad_multicast_addr
@@ -979,8 +1070,12 @@ add_multi_1	addq.l	#1,mca_UseCount(a1)
 		bra	TermIO
 
 out_of_memory	lib	Exec,Permit
+
+		move.l	#S2EVENT_ERROR!S2EVENT_SOFTWARE,d0
+		bsr	DoEvent
+
 		moveq	#S2ERR_NO_RESOURCES,d0
-		moveq	#S2WERR_MULTICAST_FULL,d1
+		moveq	#0,d1
 		bra	IOError
 
 ;
@@ -990,6 +1085,11 @@ dev_DelMultiCast
 		ifd	DEBUG
 		DMSG	<'S2_DELMULTICASTADDRESS',LF>
 		endc
+
+		btst	#UNITB_CONFIGURED,UNIT_FLAGS(a3)
+		beq	not_configured
+		btst	#UNITB_ONLINE,UNIT_FLAGS(a3)
+		beq	not_online
 
 		btst	#0,IOS2_SRCADDR(a2)
 		beq	bad_multicast_addr
@@ -1119,8 +1219,9 @@ multicast_not_found
 ;
 ; CMD_FLUSH
 ;
-dev_Flush	bsr	Abort_All	;abort all pending requests
-		bra	TermIO
+dev_Flush	moveq	#1,d0
+		bsr	Abort_All	;abort all pending requests
+		bra	TermIO		;(including S2_ONEVENTs)
 
 ;
 ; S2_ONLINE
@@ -1133,12 +1234,41 @@ dev_OnLine
 		btst	#UNITB_CONFIGURED,UNIT_FLAGS(a3)
 		beq	not_configured
 
+		move.l	a6,-(sp)
+		move.l	dev_SysBase(a6),a6
+		lib	Forbid
+
 		bset	#UNITB_ONLINE,UNIT_FLAGS(a3)
-		beq	TermIO
+		beq.b	online_ok
+
+		lib	Permit
+		move.l	(sp)+,a6
 
 		moveq	#S2ERR_BAD_STATE,d0
 		moveq	#S2WERR_UNIT_ONLINE,d1
 		bra	IOError
+
+online_ok	lea	du_NIC_Intr(a3),a1
+		moveq	#INTB_PORTS,d0
+		lib	AddIntServer
+
+		move.l	du_BoardAddr1(a3),a0
+		move.b	#CRF_NODMA!CRF_START,NIC_CR(a0) ; start the NIC
+		move.b	#$ff,NIC_ISR(a0)	; clear interrupt status
+		move.b	#%00111111,NIC_IMR(a0)	; enable interrupts
+
+		lib	Permit
+		move.l	(sp)+,a6
+
+		lea	du_LastStart+TV_SECS(a3),a0
+		lea	du_LastStart+TV_MICRO(a3),a1
+		lib	Intuition,CurrentTime
+		bset	#UNITB_ONLINE,UNIT_FLAGS(a3)
+		addq.l	#1,du_Reconfigurations(a3)
+
+		moveq	#S2EVENT_ONLINE,d0
+		bsr	DoEvent
+		bra	TermIO
 
 ;
 ; S2_OFFLINE
@@ -1158,7 +1288,27 @@ dev_OffLine
 		moveq	#S2WERR_UNIT_OFFLINE,d1
 		bra	IOError
 
-offline_ok	bsr	Abort_All	;abort all pending requests
+offline_ok	moveq	#0,d0		;don't abort S2_ONLINEs
+		bsr	Abort_All	;abort all pending requests
+
+; wait for the current transmit to complete
+wait_tx_complete
+		btst	#UNITB_CURRENTTX,UNIT_FLAGS(a3)
+		bne.b	wait_tx_complete	; busy wait loop...
+;
+; shut down the device
+;
+		move.l	du_BoardAddr1(a3),a0
+		move.b	#CRF_NODMA!CRF_STOP,NIC_CR(a0) ; reset & select page 0
+		move.b	#0,NIC_IMR(a0)			 ; disable all interrupts
+		move.b	#$ff,NIC_ISR(a0)		 ; clear all interrupts
+
+		lea	du_NIC_Intr(a3),a1
+		moveq	#INTB_PORTS,d0
+		lib	Exec,RemIntServer
+
+		moveq	#S2EVENT_OFFLINE,d0
+		bsr	DoEvent
 		bra	TermIO
 
 ;
@@ -1176,7 +1326,7 @@ dev_DeviceQuery
 
 		move.l	d0,a1
 		cmp.l	#S2DQ_SIZE,S2DQ_SIZEAVAILABLE(a1)
-		bcs.b	devquery_not_enough_space
+		bcs.b	bad_stat_data
 
 		addq.l	#4,a1
 		lea	DevQueryData(pc),a0
@@ -1184,8 +1334,7 @@ dev_DeviceQuery
 		lib	Exec,CopyMem
 		bra	TermIO
 
-devquery_not_enough_space
-		moveq	#S2ERR_BAD_ARGUMENT,d0
+bad_stat_data	moveq	#S2ERR_BAD_ARGUMENT,d0
 		moveq	#S2WERR_BAD_STATDATA,d1
 		bra	IOError
 
@@ -1223,7 +1372,6 @@ dev_GetStationAddr
 
 		lib	Permit
 		move.l	(sp)+,a6
-
 		bra	TermIO
 
 ;
@@ -1248,7 +1396,6 @@ dev_GetGlobalStats
 		move.l	du_PacketsSent(a3),S2DS_PACKETSSENT(a5)
 		move.l	du_BadPackets(a3),S2DS_BADDATA(a5)
 		move.l	du_Overruns(a3),S2DS_OVERRUNS(a5)
-		move.l	du_SoftMisses(a3),S2DS_SOFTMISSES(a5)
 		move.l	du_UnknownTypesReceived(a3),S2DS_UNKNOWNTYPESRECEIVED(a5)
 		move.l	du_Reconfigurations(a3),S2DS_RECONFIGURATIONS(a5)
 		move.l	du_LastStart+TV_SECS(a3),S2DS_LASTSTART+TV_SECS(a5)
@@ -1256,17 +1403,49 @@ dev_GetGlobalStats
 
 		lib	Enable
 		movem.l	(sp)+,a5/a6
-
 		bra	TermIO
+
+;
+; S2_GETSPECIALSTATS
+;
+; IOS2_STATDATA  -  pointer to Sana2SpecialStats structure
+;
+dev_GetSpecialStats
+		ifd	DEBUG
+		DMSG	<'S2_GETSPECIALSTATS',LF>
+		endc
+
+		move.l	IOS2_STATDATA(a2),d0
+		beq	null_pointer
+
+		move.l	d0,a1
+		tst.l	S2SSH_RECORDCOUNTMAX(a1)
+		beq	bad_stat_data
+		clr.l	S2SSH_RECORDCOUNTSUPPLIED(a1)
+;
+; bad multicast filter count
+;
+		move.l	#S2SS_ETHERNET_BADMULTICAST,S2SSH_SIZE+S2SSR_TYPE(a1)
+		lea	bad_multicast_filter_txt(pc),a0
+		move.l	a0,S2SSH_SIZE+S2SSR_STRING(a1)
+		move.l	du_BadMultiCastFilterCount(a3),S2SSH_SIZE+S2SSR_COUNT(a1)
+		addq.l	#1,S2SSH_RECORDCOUNTSUPPLIED(a1)
+
+specialstats_done
+		bra	TermIO
+
+bad_multicast_filter_txt
+		dc.b	'Bad multicast filtering',0
+		ds.w	0
 
 ;
 ; S2_CONFIGINTERFACE
 ;
 ; IOS2_SRCADDR  --  address of the interface (to be configured)
 ;
-; Note that according to the SanaII-spec, the driver should refuse
+; Note that according to the SanaII-spec, an ethernet driver should refuse
 ; to configure itself to any other address than the hardware default.
-; This implementation allows configuration to any (non-multicast) address
+; This device allows configuration to any (non-broad/multicast) address
 ;
 dev_ConfigInterface
 		ifd	DEBUG
@@ -1469,7 +1648,10 @@ not_online	move.b	#S2ERR_OUTOFSERVICE,d0
 		move.b	#S2WERR_UNIT_OFFLINE,d1
 		bra	IOError
 
-mtu_exceeded	move.b	#S2ERR_MTU_EXCEEDED,d0
+mtu_exceeded	moveq	#S2EVENT_ERROR!S2EVENT_TX,d0
+		bsr	DoEvent
+
+		move.b	#S2ERR_MTU_EXCEEDED,d0
 		moveq	#0,d1
 		bra	IOError
 
@@ -1533,6 +1715,94 @@ dev_ReadOrphan
 		rts
 
 ;
+; S2_ONEVENT
+;
+; IOS2_WIREERROR - event mask (both input & output)
+;
+; ONLINE/OFFLINE events are returned immediately if the device
+; is already in the state to be waited for. All other requests
+; are just queued to du_EventList.
+;
+dev_OnEvent
+		ifd	DEBUG
+		move.l	IOS2_WIREERROR(a2),d0
+		DMSG	<'S2_ONEVENT ($%lx)',LF>
+		endc
+
+		btst	#S2EVENTB_ONLINE,IOS2_WIREERROR+3(a2)
+		beq.b	no_online
+
+		btst	#UNITB_ONLINE,UNIT_FLAGS(a3)
+		beq.b	no_online
+
+		move.b	#S2EVENT_ONLINE,IOS2_WIREERROR+3(a2)
+		bra	TermIO
+
+no_online	btst	#S2EVENTB_OFFLINE,IOS2_WIREERROR+3(a2)
+		beq.b	no_offline
+
+		btst	#UNITB_ONLINE,UNIT_FLAGS(a3)
+		bne.b	no_offline
+
+		move.b	#S2EVENT_OFFLINE,IOS2_WIREERROR+3(a2)
+		bra	TermIO
+
+no_offline	move.l	a6,-(sp)
+		move.l	dev_SysBase(a6),a6
+		lib	Disable
+
+		bset	#IOB_QUEUED,IO_FLAGS(a2)
+		lea	du_EventList(a3),a0
+		move.l	a2,a1
+		lib	AddTail
+
+		lib	Enable
+		move.l	(sp)+,a6
+		rts
+
+;
+; handle waiting events
+; terminate event requests that match the event mask in d0
+;
+; inputs:
+;  d0  -  event mask
+;  a3  -  unit ptr
+;
+DoEvent		movem.l	d2/d3/a2,-(sp)
+		ifd	DEBUG
+		DMSG	<'DoEvent $%lx',LF>
+		endc
+
+		move.l	d0,d3
+
+		move.l	du_EventList(a3),a2
+
+doevent_loop	move.l	(a2),d2
+		beq.b	doevent_end
+
+		ifd	DEBUG
+		move.l	a2,d0
+		move.l	IOS2_WIREERROR(a2),d1
+		DMSG	<'DoEvent loop: event $%lx, mask $%lx',LF>
+		endc
+
+		move.b	d3,d0
+		and.b	IOS2_WIREERROR+3(a2),d0
+		beq.s	doevent_next
+
+		move.b	d0,IOS2_WIREERROR+3(a2)
+
+		move.l	a2,a1
+		lib	Exec,Remove
+		bsr	TermIO
+
+doevent_next	move.l	d2,a2
+		bra.b	doevent_loop
+
+doevent_end	movem.l	(sp)+,d2/d3/a2
+		rts
+
+;
 ; actually send a packet
 ;
 ; unit pointer in a3, iorequest in a2
@@ -1556,7 +1826,7 @@ ActualSendPacket
 		jsr	(a2)
 		move.l	(sp)+,a2
 		tst.l	d0
-		beq	buffm_error
+		beq	tx_buffm_error
 		moveq	#14,d0
 		add.l	IOS2_DATALENGTH(a2),d0
 		bra.b	do_send_packet
@@ -1570,7 +1840,7 @@ raw_packet	move.l	IOS2_DATALENGTH(a2),d0
 		jsr	(a2)
 		move.l	(sp)+,a2
 		tst.l	d0
-		beq	buffm_error
+		beq	tx_buffm_error
 
 		move.l	IOS2_DATALENGTH(a2),d0
 
@@ -1607,8 +1877,12 @@ tx_copy_loop1	dbf	d1,tx_copy_loop
 		move.b	#CRF_NODMA!CRF_TRANSMIT!CRF_START,NIC_CR(a0)
 		rts
 
-buffm_error	clr.l	du_CurrentTxReq(a3)	;(not really necessary)
+tx_buffm_error	clr.l	du_CurrentTxReq(a3)	;(not really necessary)
 		bclr	#UNITB_CURRENTTX,UNIT_FLAGS(a3)
+
+		moveq	#S2EVENT_ERROR!S2EVENT_TX!S2EVENT_BUFF,d0
+		bsr	DoEvent
+
 		move.b	#S2ERR_SOFTWARE,d0
 		move.b	#S2WERR_BUFF_ERROR,d1
 		bra	IOError
@@ -1631,6 +1905,9 @@ NIC_IntRoutine	movem.l	d2/a2/a3/a4/a6,-(sp)
 		DMSG	<'Interrupt, ISR = $%lx',LF>
 		endc
 
+		btst	#ISRB_OVW,d0
+		bne	rec_buffer_overflow
+
 		btst	#ISRB_PTX,d0
 		bne	transmit_ok
 		btst	#ISRB_TXE,d0
@@ -1642,13 +1919,23 @@ NIC_IntRoutine	movem.l	d2/a2/a3/a4/a6,-(sp)
 		bne	receive_err
 
 ;
-; handle all other interrupts here.
+; handle all other interrupts here (there shouldn't be any...)
 ;
 		move.b	d0,NIC_ISR(a4)
 		bra	nic_int_ok		;!!!!
 
-receive_ok
+receive_ok	move.b	#ISRF_PRX,NIC_ISR(a4)		; clear interrupt
+
 receive_packet	moveq	#0,d0
+		move.b	du_NextPkt(a3),d0
+
+		move.b	#CRF_PAGE0!CRF_NODMA!CRF_START,NIC_CR(a4)	;page 1
+		move.b	NIC_CURR(a4),d1
+		move.b	#CRF_NODMA!CRF_START,NIC_CR(a4)			;page 0
+		cmp.b	d0,d1
+		beq	nic_int_ok
+
+		moveq	#0,d0
 		move.b	du_NextPkt(a3),d0
 		lsl.w	#8,d0
 		add.w	d0,a4
@@ -1886,6 +2173,9 @@ packet_copied
 		move.b	#S2ERR_SOFTWARE,IO_ERROR(a2)
 		move.b	#S2WERR_BUFF_ERROR,IOS2_WIREERROR+3(a2)
 
+		moveq	#S2EVENT_ERROR!S2EVENT_RX!S2EVENT_BUFF,d0
+		bsr	DoEvent
+
 4$		move.l	a2,a1
 		lib	Exec,Remove
 		bsr	TermIO
@@ -1910,6 +2200,13 @@ orphan_packet
 		endc
 
 		addq.l	#1,du_UnknownTypesReceived(a3)
+	;;;	bra.b	next_packet
+
+oversize_packet	;;;addq.l	#1,du_Overruns(a3)	;is this correct?
+		; increment the overrun counter only when there is
+		; a receive buffer ring overflow...
+
+	;;	maybe add DoEvent(S2EVENT_RX) here...
 
 next_packet	move.w	(a4),d0
 		lsr.w	#8,d0
@@ -1931,28 +2228,24 @@ next_packet	move.w	(a4),d0
 		ifd	DEBUG
 		DMSG	<'New Boundary value = $%lx',LF>
 		endc
+;
+; go back checking if there are any other packets in the buffer ring
+;
+		bra	receive_packet
 
 ;
-; check here if there are any other packets in the receive ring !!!
-; (compare du_NextPkt and NIC_CURR...)
-; ... now tries to do it ...
+; receive error. should probably increment some statistics
 ;
-
-		move.b	#CRF_PAGE0!CRF_NODMA!CRF_START,NIC_CR(a4)	;page 1
-		move.b	NIC_CURR(a4),d0
-		move.b	#CRF_NODMA!CRF_START,NIC_CR(a4)	;page 0
-		cmp.b	du_NextPkt(a3),d0
-		bne	receive_packet
-
-		move.b	#ISRF_PRX,NIC_ISR(a4)
-		bra	nic_int_ok
-
 receive_err
 		ifd	DEBUG
 		DMSG	<'Receive error',LF>
 		endc
 
+		addq.l	#1,du_BadPackets(a3)
 		move.b	#ISRF_RXE,NIC_ISR(a4)
+
+		moveq	#S2EVENT_ERROR!S2EVENT_RX,d0
+		bsr	DoEvent
 		bra	nic_int_ok
 
 transmit_err
@@ -1964,7 +2257,7 @@ transmit_ok	and.b	#%1010,d0
 		endc
 
 		bclr	#UNITB_CURRENTTX,UNIT_FLAGS(a3)
-		beq.b	nic_int_ok	; should not happen
+		beq	nic_int_ok	; should not happen
 
 ; Set IO_ERROR/WIREERROR if an error has been detected
 ; What is a good error number here??
@@ -1972,6 +2265,11 @@ transmit_ok	and.b	#%1010,d0
 		beq.b	1$
 		move.l	du_CurrentTxReq(a3),a0
 		move.b	#S2ERR_NO_RESOURCES,IO_ERROR(a0)
+		clr.b	IOS2_WIREERROR(a0)
+
+		moveq	#S2EVENT_ERROR!S2EVENT_TX,d0
+		bsr	DoEvent
+
 		bra.b	2$
 
 1$		addq.l	#1,du_PacketsSent(a3)
@@ -1986,7 +2284,7 @@ transmit_ok	and.b	#%1010,d0
 		lea	du_TxQueue(a3),a0
 		lib	Exec,RemTail
 		move.l	d0,du_CurrentTxReq(a3)
-		beq.b	nic_int_ok
+		beq	nic_int_ok
 
 		move.l	d0,a2
 		bclr	#IOB_QUEUED,IO_FLAGS(a2)
@@ -1996,7 +2294,77 @@ transmit_ok	and.b	#%1010,d0
 		endc
 
 		bsr	ActualSendPacket
+		bra	nic_int_ok
 
+;
+; Handle receive buffer overflow here
+;
+rec_buffer_overflow
+		ifd	DEBUG
+		DMSG	<'Receive buffer ring overflow',LF>
+		endc
+
+		addq.l	#1,du_Overruns(a3)
+
+		move.b	NIC_CR(a4),d2			; store TXP bit
+		move.b	#CRF_NODMA!CRF_STOP,NIC_CR(a4)	; stop the NIC
+;
+; 1.6 ms delay here !!
+; (It might be better to do this wait outside the interrupt,
+; but this is a low-priority interrupt,
+; it shouldn't affect serial receive, for example)
+;
+		move.w	#2000-1,d0
+busy_loop	tst.b	Ciaa+ciapra	; read a CIA location
+		dbf	d0,busy_loop
+
+;
+; clear remote byte count registers
+;
+		moveq	#0,d0
+		move.b	d0,NIC_RBCR0(a4)
+		move.b	d0,NIC_RBCR1(a4)
+;
+; check if resend is needed
+;
+		btst	#CRB_TRANSMIT,d2
+		beq.b	recb1
+
+		move.b	NIC_ISR(a4),d0		; read interrupt status
+		and.b	#ISRF_PTX!ISRF_TXE,d0	; completed?
+		beq.s	recb1
+
+		clr.b	d2			; clear resend flag
+
+recb1		move.b	#TCRF_LB1,NIC_TCR(a4)		; loopback mode
+		move.b	#CRF_NODMA!CRF_START,NIC_CR(a4)	; start the NIC
+;
+; Now remove all packets from the receive buffer ring (!!)
+; (This discards some good packets...)
+;
+		move.b	#CRF_PAGE0!CRF_NODMA!CRF_START,NIC_CR(a4)	;page1
+		move.b	NIC_CURR(a4),d0
+		move.b	#CRF_NODMA!CRF_START,NIC_CR(a4)			;page0
+		move.b	d0,du_NextPkt(a3)
+		subq.b	#1,d0
+		cmp.b	du_PStart(a3),d0
+		bge.b	1$
+		move.b	du_PStop(a3),d0
+		subq.b	#1,d0
+1$		move.l	du_BoardAddr1(a3),a4
+		move.b	d0,NIC_BNDRY(a4)
+
+		move.b	#ISRF_OVW,NIC_ISR(a4)		; clear the interrupt
+		move.b	#0,NIC_TCR(a4)	; loopback off
+
+		btst	#CRB_TRANSMIT,d2
+		beq.b	nic_int_ok
+;
+; retransmit the current packet
+;
+		move.b	#CRF_NODMA!CRF_TRANSMIT!CRF_START,NIC_CR(a4)
+;
+;
 nic_int_ok	moveq	#1,d0
 		bra.b	nic_int_end
 

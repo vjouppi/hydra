@@ -26,6 +26,7 @@ EADDR_BYTES	equ	6
 		 STRUCT	du_TxQueue,MLH_SIZE
 		 STRUCT	du_RxQueue,MLH_SIZE
 		 STRUCT	du_RxOrphanQueue,MLH_SIZE
+		 STRUCT	du_EventList,MLH_SIZE
 		 STRUCT	du_MultiCastList,MLH_SIZE
 		 STRUCT	du_MultiCastBitUseCount,2*64
 		 APTR	du_CurrentTxReq
@@ -40,7 +41,6 @@ EADDR_BYTES	equ	6
 		 ULONG	du_PacketsReceived
 		 ULONG	du_BadPackets
 		 ULONG	du_Overruns
-		 ULONG	du_SoftMisses
 		 ULONG	du_UnknownTypesReceived
 		 ULONG	du_Reconfigurations
 		 ULONG	du_BadMultiCastFilterCount

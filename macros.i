@@ -4,6 +4,10 @@
 CR		equ	13
 LF		equ	10
 
+;
+; create an ascii representation of a decimal number
+; (used for the version/revision numbers in the device id string)
+;
 StrNumber	macro
 __XXNumber	set	\1
 		ifgt	__XXNumber-99
@@ -21,6 +25,14 @@ __XXNumber	set	__XXNumber-((__XXNumber/10)*10)
 		dc.b	__XXNumber+'0'
 		endm
 
+;
+; library call macro
+;
+; lib Function		-> jsr _LVOFunction(a6)
+;
+; lib Library,Function	-> move.l a6,-(sp), move.l dev_LibraryBase(a6),a6
+;			   jsr _LVOFunction(a6), move.l (sp)+,a6
+;
 lib		macro
 		ifeq	NARG-2
 		move.l	a6,-(sp)
@@ -30,6 +42,26 @@ lib		macro
 		endc
 		ifeq	NARG-1
 		jsr	_LVO\1(a6)
+		endc
+		endm
+
+;
+; generate bit number equates for bit maks (used with S2EVENT_xxx)
+;
+bitnum		macro	; symbol,bitmask
+xxBitMask	set	1
+xxBitNum	set	0
+		findbit	\2
+\1		equ	xxBitNum
+		endm
+;
+; recursive macro to find bit number corresponding to a bit mask.
+;
+findbit		macro
+		ifeq	xxBitMask&(\1)
+xxBitMask	set	xxBitMask*2
+xxBitNum	set	xxBitNum+1
+		findbit	\1
 		endc
 		endm
 
