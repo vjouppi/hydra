@@ -5,7 +5,7 @@
 ;
 
 ;
-; WARNING: Very preliminary version!! most commands don't work!!
+; WARNING: Very preliminary version!!
 ;
 
 ;
@@ -21,10 +21,11 @@
 ;
 
 ;
-; Receive, multicast receive, type stats, special stats and events are
-; not implemented yet.
+; multicast receive, type stats, special stats and events are
+; not implemented yet. not all global stats are properly updated.
+; does not handle receive buffer ring overflow.
 ;
-; transmit works, but something seems to be trashing memory somewhere...
+; receive & transmit work (but not perfectly...)
 ;
 
 DEBUG		set	1
@@ -56,8 +57,14 @@ DEBUG		set	1
 
 		include	'macros.i'
 
-;;; put these in an include file
 
+DEV_VERSION	equ	1
+DEV_REVISION	equ	3
+
+;
+; start of the first hunk of the device file
+; if someone tries to run this from CLI/Shell, return an error
+;
 dev_SafeExit	moveq	#-1,d0
 		rts
 
@@ -79,7 +86,7 @@ dev_idstring	dc.b	'hydradev '
 		StrNumber DEV_VERSION
 		dc.b	'.'
 		StrNumber DEV_REVISION
-		dc.b	' (6.11.92)',CR,LF,0
+		dc.b	' (7.11.92)',CR,LF,0
 
 copyright_msg	dc.b	'Copyright © 1992 by Bits & Chips Oy, Finland',CR,LF,0
 
@@ -311,10 +318,14 @@ close_end	movem.l	(sp)+,a2/a3
 ;
 dev_Expunge	tst.w	LIB_OPENCNT(a6)
 		beq.s	do_expunge
-		or.b	#LIBF_DELEXP,LIB_FLAGS(a6)
+
+		or.b	#LIBF_DELEXP,LIB_FLAGS(a6)	;delayed expunge
 		moveq	#0,d0
 		rts
 
+;
+; really expunge the device
+;
 do_expunge	movem.l	d2/d3/a4/a6,-(sp)
 
 		ifd	DEBUG
@@ -521,6 +532,8 @@ ram_end
 		beq	init_unit_alloc_fail
 
 		move.l	d0,a3
+		move.l	LN_NAME(a6),LN_NAME(a3)
+		move.b	#PA_IGNORE,MP_FLAGS(a3)	;the MsgPort in unit is not used
 		move.l	a6,du_DevicePtr(a3)
 		move.l	d2,du_UnitNum(a3)
 		move.l	a2,du_ConfigDev(a3)
@@ -535,7 +548,7 @@ ram_end
 ;
 ; select page 0 & disable & clear NIC interrupts before adding interrupt server
 ;
-		move.b	#CMDF_NODMA!CMDF_STOP,NIC_CR(a0)
+		move.b	#CRF_NODMA!CRF_STOP,NIC_CR(a0)
 		move.b	#0,NIC_IMR(a0)			; disable interrupts
 		move.b	#$ff,NIC_ISR(a0)		; clear interrupts
 
@@ -615,7 +628,7 @@ Expunge_Unit	movem.l	a3/a6,-(sp)
 
 		move.l	a1,a3
 		move.l	du_BoardAddr1(a3),a0
-		move.b	#CMDF_NODMA!CMDF_STOP,NIC_CR(a0) ; reset & select page 0
+		move.b	#CRF_NODMA!CRF_STOP,NIC_CR(a0) ; reset & select page 0
 		move.b	#0,NIC_IMR(a0)			 ; disable all interrupts
 		move.b	#$ff,NIC_ISR(a0)		 ; clear all interrupts
 
@@ -636,11 +649,12 @@ Expunge_Unit	movem.l	a3/a6,-(sp)
 ;
 ; BeginIO routine
 ;
-;
+; A1  -  pointer to IORequest
+; A6  -  pointer to device
 ;
 dev_BeginIO	movem.l	a2/a3,-(sp)
 		move.l	a1,a2
-		clr.b	LN_TYPE(a2)		;LN_TYPE != NT_REPLYMSG
+		move.b	#NT_MESSAGE,LN_TYPE(a2)		;LN_TYPE != NT_REPLYMSG
 		clr.b	IO_ERROR(a2)
 		clr.l	IOS2_WIREERROR(a2)
 		move.l	IO_UNIT(a2),a3
@@ -695,8 +709,10 @@ TermIO
 termio_exit	rts
 
 ;
-; AbortIO routine, currently not fully implemented (!!)
+; AbortIO routine
+; a1  -  pointer to IORequest
 ;
+; (Note: S2_ONEVENT must be abortable when implemented..!!)
 ;
 dev_AbortIO	movem.l	a2/a3,-(sp)
 		move.l	a1,a2
@@ -714,19 +730,101 @@ dev_AbortIO	movem.l	a2/a3,-(sp)
 		cmp.w	#S2_BROADCAST,d0
 		beq.s	abort_write
 
-		;!!!!
-		bra.s	AbortIO_End
+		cmp.w	#CMD_READ,d0
+		beq.s	abort_read
+		cmp.w	#S2_READORPHAN,d0
+		bne.s	AbortIO_End
 
+abort_read
 abort_write	bclr	#IOB_QUEUED,IO_FLAGS(a2)
 		beq.s	AbortIO_End
 
 		move.l	a2,a1
 		lib	Exec,Remove
+
+		ifd	DEBUG
+		DMSG	<'Unlinked request',LF>
+		endc
+
 		moveq	#IOERR_ABORTED,d0
 		moveq	#0,d1
 		bsr	IOError
 
 AbortIO_End	movem.l	(sp)+,a2/a3
+		rts
+
+;
+; Abort all pending requests, used by CMD_FLUSH and S2_OFFLINE
+; A3  -  pointer to unit structure
+; A6  -  pointer to device structure
+; (this really should only disable PORTS interrupt...
+; Disable()ing for this long a time surely affects serial receive...)
+; (No request on any of the queues should have IOB_QUICK set)
+;
+; This doesn't abort the currently active transmit, if there is one
+;
+; Should also abort events when they get implemented!!
+;
+Abort_All	movem.l	d2/a2/a6,-(sp)
+
+		ifd	DEBUG
+		DMSG	<'Abort_All',LF>
+		endc
+
+		move.l	dev_SysBase(a6),a6
+		lib	Disable
+
+		move.l	du_TxQueue+MLH_HEAD(a3),a2
+
+abort_tx_loop	move.l	(a2),d2
+		beq.s	all_tx_aborted
+
+		move.b	#IOERR_ABORTED,IO_ERROR(a2)
+		move.l	a2,a1
+		lib	ReplyMsg
+
+		move.l	d2,a2
+		bra.s	abort_tx_loop
+
+all_tx_aborted	move.l	du_RxQueue+MLH_HEAD(a3),a2
+
+abort_rx_loop	move.l	(a2),d2
+		beq.s	all_rx_aborted
+
+		move.b	#IOERR_ABORTED,IO_ERROR(a2)
+		move.l	a2,a1
+		lib	ReplyMsg
+
+		move.l	d2,a2
+		bra.s	abort_rx_loop
+
+all_rx_aborted	move.l	du_RxOrphanQueue+MLH_HEAD(a3),a2
+
+abort_orphan_loop
+		move.l	(a2),d2
+		beq.s	all_orphans_aborted
+
+		move.b	#IOERR_ABORTED,IO_ERROR(a2)
+		move.l	a2,a1
+		lib	ReplyMsg
+
+		move.l	d2,a2
+		bra.s	abort_orphan_loop
+
+all_orphans_aborted
+		lea	du_TxQueue(a3),a0
+		NEWLIST	a0
+
+		lea	du_RxQueue(a3),a0
+		NEWLIST	a0
+
+		lea	du_RxOrphanQueue(a3),a0
+		NEWLIST	a0
+;
+; (it was a looong Disable() ... really shouldn't do that...)
+;
+		lib	Enable
+		movem.l	(sp)+,d2/a2/a6
 		rts
 
 ;
@@ -744,7 +842,7 @@ dev_CmdTable	dev_cmd	invalid_cmd		;CMD_INVALID
 		dev_cmd	invalid_cmd		;CMD_CLEAR
 		dev_cmd	invalid_cmd		;CMD_STOP
 		dev_cmd	invalid_cmd		;CMD_START
-		dev_cmd	invalid_cmd		;CMD_FLUSH (should implement this??)
+		dev_cmd	dev_Flush		;CMD_FLUSH
 		dev_cmd	dev_DeviceQuery		;S2_DEVICEQUERY
 		dev_cmd	dev_GetStationAddr	;S2_GETSTATIONADDRESS
 		dev_cmd	dev_ConfigInterface	;S2_CONFIGINTERFACE
@@ -765,13 +863,10 @@ dev_CmdTable	dev_cmd	invalid_cmd		;CMD_INVALID
 		dev_cmd	dev_OffLine		;S2_OFFLINE
 
 ;
-; these command are not yet implemented
+; CMD_FLUSH
 ;
-dev_Read	DMSG	<'CMD_READ',LF>
-		bra	invalid_cmd
-
-dev_ReadOrphan	DMSG	<'S2_READORPHAN',LF>
-		bra	invalid_cmd
+dev_Flush	bsr	Abort_All	;abort all pending requests
+		bra	TermIO
 
 ;
 ; S2_ONLINE
@@ -809,11 +904,7 @@ dev_OffLine
 		moveq	#S2WERR_UNIT_OFFLINE,d1
 		bra	IOError
 
-offline_ok
-;
-; should abort all pending iorequests here!!!!
-;
-
+offline_ok	bsr	Abort_All	;abort all pending requests
 		bra	TermIO
 
 ;
@@ -946,16 +1037,18 @@ dev_ConfigInterface
 
 		move.l	du_BoardAddr1(a3),a0
 
-		move.b	#CMDF_NODMA!CMDF_STOP,NIC_CR(a0) ; page 0, reset NIC
-		move.b	#%01001011,NIC_DCR(a0)	; fifo thres. 8, 68k byteorder
+		move.b	#CRF_NODMA!CRF_STOP,NIC_CR(a0) ; page 0, reset NIC
+
+; fifo thres. 8, 68k byteorder, word-wide DMA
+		move.b	#DCRF_FT1!DCRF_LS!DCRF_BOS!DCRF_WTS,NIC_DCR(a0)
 
 		moveq	#0,d0
 		move.b	d0,NIC_RBCR0(a0)
 		move.b	d0,NIC_RBCR1(a0)
 
-		move.b	#%00000100,NIC_RCR(a0)	; accept broadcast
+		move.b	#RCRF_AB,NIC_RCR(a0)	; accept broadcast
 
-		move.b	#%00000100,NIC_TCR(a0)	; loopback mode (for init)
+		move.b	#TCRF_LB1,NIC_TCR(a0)	; loopback mode (for init)
 
 		move.b	du_PStart(a3),d0
 		move.b	d0,NIC_PSTART(a0)
@@ -966,7 +1059,7 @@ dev_ConfigInterface
 		move.b	#%00111111,NIC_IMR(a0)	; enable interrupts
 
 ; select page 1
-		move.b	#CMDF_PAGE0!CMDF_NODMA!CMDF_STOP,NIC_CR(a0)
+		move.b	#CRF_PAGE0!CRF_NODMA!CRF_STOP,NIC_CR(a0)
 
 		move.b	du_CurrentAddr(a3),NIC_PAR0(a0)
 		move.b	du_CurrentAddr+1(a3),NIC_PAR1(a0)
@@ -975,8 +1068,10 @@ dev_ConfigInterface
 		move.b	du_CurrentAddr+4(a3),NIC_PAR4(a0)
 		move.b	du_CurrentAddr+5(a3),NIC_PAR5(a0)
 
-; no need to initialize the multicast registers?
-		moveq	#-1,d0
+;
+; clear all multicast filter bits
+;
+		moveq	#0,d0
 		move.b	d0,NIC_MAR0(a0)
 		move.b	d0,NIC_MAR1(a0)
 		move.b	d0,NIC_MAR2(a0)
@@ -991,7 +1086,7 @@ dev_ConfigInterface
 		move.b	d0,NIC_CURR(a0)
 		move.b	d0,du_NextPkt(a3)
 
-		move.b	#CMDF_NODMA!CMDF_START,NIC_CR(a0) ; page 0, start
+		move.b	#CRF_NODMA!CRF_START,NIC_CR(a0) ; page 0, start
 
 		move.b	#0,NIC_TCR(a0)		; loopback mode off
 ;
@@ -1056,7 +1151,7 @@ dev_Broadcast
 ;
 ; CMD_WRITE
 ;
-; IOS2_FLAGS     -- SANA2IOB_RAW
+; IO_FLAGS     -- SANA2IOB_RAW
 ; IOS2_PACKETTYPE - type of packet to send
 ; IOS2_DSTADDR    - destination address
 ; IOS2_DATALENGTH - length of data to send
@@ -1075,6 +1170,9 @@ do_write	btst	#UNITB_CONFIGURED,UNIT_FLAGS(a3)
 		beq	not_configured
 		btst	#UNITB_ONLINE,UNIT_FLAGS(a3)
 		beq	not_online
+
+		cmp.l	#1500,IOS2_DATALENGTH(a2)
+		bhi	mtu_exceeded
 
 		bclr	#SANA2IOB_QUICK,IO_FLAGS(a2)
 
@@ -1115,6 +1213,69 @@ not_configured	move.b	#S2ERR_BAD_STATE,d0
 not_online	move.b	#S2ERR_OUTOFSERVICE,d0
 		move.b	#S2WERR_UNIT_OFFLINE,d1
 		bra	IOError
+
+mtu_exceeded	move.b	#S2ERR_MTU_EXCEEDED,d0
+		moveq	#0,d1
+		bra	IOError
+
+;
+; CMD_READ
+;
+;
+; IO_FLAGS         -  input SANA2IOB_RAW -- output SANA2IOB_RAW/BCAST/MCAST
+; IOS2_PACKETTYPE  -  packet type to receive
+; IOS2_DATA        -  received data copied here (with CopyToBuff)
+; IOS2_DATALENGTH  -  output: length of the received packet
+; IOS2_SRC/DSTADDR -  output: source/destination address
+;
+dev_Read
+		ifd	DEBUG
+		DMSG	<'CMD_READ',LF>
+		endc
+
+		btst	#UNITB_CONFIGURED,UNIT_FLAGS(a3)
+		beq	not_configured
+		btst	#UNITB_ONLINE,UNIT_FLAGS(a3)
+		beq	not_online
+
+		bclr	#SANA2IOB_QUICK,IO_FLAGS(a2)
+
+		move.l	a6,-(sp)
+		move.l	dev_SysBase(a6),a6
+		lib	Disable
+		bset	#IOB_QUEUED,IO_FLAGS(a2)
+		lea	du_RxQueue(a3),a0
+		move.l	a2,a1
+		lib	AddHead
+		lib	Enable
+		move.l	(sp)+,a6
+		rts
+
+;
+; these command are not yet implemented
+;
+dev_ReadOrphan
+		ifd	DEBUG
+		DMSG	<'S2_READORPHAN',LF>
+		endc
+
+		btst	#UNITB_CONFIGURED,UNIT_FLAGS(a3)
+		beq	not_configured
+		btst	#UNITB_ONLINE,UNIT_FLAGS(a3)
+		beq	not_online
+
+		bclr	#SANA2IOB_QUICK,IO_FLAGS(a2)
+
+		move.l	a6,-(sp)
+		move.l	dev_SysBase(a6),a6
+		lib	Disable
+		bset	#IOB_QUEUED,IO_FLAGS(a2)
+		lea	du_RxOrphanQueue(a3),a0
+		move.l	a2,a1
+		lib	AddHead
+		lib	Enable
+		move.l	(sp)+,a6
+		rts
 
 ;
 ; actually send a packet
@@ -1163,11 +1324,15 @@ do_send_packet
 		DMSG	<'Actually send packet, length = %ld',LF>
 		endc
 
+		move.l	du_BoardAddr1(a3),a1
+		move.b	du_TPStart(a3),d1
+		lsl.w	#8,d1
+		add.w	d1,a1		; max. TPStart value is $7f
+
 		move.w	d0,d1
 		addq.w	#3,d1
 		lsr.w	#2,d1		;# of longwords
 		lea	du_TxBuff(a3),a0
-		move.l	du_BoardAddr1(a3),a1		
 		bra.s	tx_copy_loop1
 
 tx_copy_loop	move.l	(a0)+,(a1)+
@@ -1184,7 +1349,7 @@ tx_copy_loop1	dbf	d1,tx_copy_loop
 		lsr.w	#8,d0
 		move.b	d0,NIC_TBCR1(a0)		;transmit byte count high
 ; send packet
-		move.b	#CMDF_NODMA!CMDF_TRANSMIT!CMDF_START,NIC_CR(a0)
+		move.b	#CRF_NODMA!CRF_TRANSMIT!CRF_START,NIC_CR(a0)
 		rts
 
 buffm_error	clr.l	du_CurrentTxReq(a3)	;(not really necessary)
@@ -1198,12 +1363,12 @@ buffm_error	clr.l	du_CurrentTxReq(a3)	;(not really necessary)
 ;
 ; IS_DATA is pointer to the device unit structure
 ;
-NIC_IntRoutine	movem.l	a2/a3/a6,-(sp)
+NIC_IntRoutine	movem.l	d2/a2/a3/a4/a6,-(sp)
 		move.l	a1,a3
 		move.l	du_DevicePtr(a3),a6
-		move.l	du_BoardAddr1(a3),a0
+		move.l	du_BoardAddr1(a3),a4
 		moveq	#0,d0
-		move.b	NIC_ISR(a0),d0
+		move.b	NIC_ISR(a4),d0
 		and.b	#$3f,d0
 		beq	nic_int_continue	;next interrupt server
 
@@ -1211,17 +1376,279 @@ NIC_IntRoutine	movem.l	a2/a3/a6,-(sp)
 		DMSG	<'Interrupt, ISR = $%lx',LF>
 		endc
 
-		btst	#1,d0
-		bne.s	transmit_ok
-		btst	#3,d0
-		bne.s	transmit_err
+		btst	#ISRB_PTX,d0
+		bne	transmit_ok
+		btst	#ISRB_TXE,d0
+		bne	transmit_err
 
-		move.b	d0,NIC_ISR(a0)
+		btst	#ISRB_PRX,d0
+		bne.s	receive_ok
+		btst	#ISRB_RXE,d0
+		bne	receive_err
+
+		move.b	d0,NIC_ISR(a4)
 		bra	nic_int_ok		;!!!!
+
+receive_ok	move.b	#ISRF_PRX,NIC_ISR(a4)
+
+receive_packet	moveq	#0,d0
+		move.b	du_NextPkt(a3),d0
+		lsl.w	#8,d0
+		add.w	d0,a4
+
+		ifd	DEBUG
+		move.l	a4,d0
+		move.l	(a4),d1
+		DMSG	<'receive ok, Buffer addr = $%lx, first longword = $%lx',LF>
+		endc
+;
+; should we check receive status here? bad packets are discarded anyway...
+;
+
+;
+; 00	 - next page number
+; 01	 - receive status
+; 02..03 - packet length
+; 04..09 - dest. address
+; 0a..0f - src. address
+; 10..11 - packet type
+; 12..   - packet data
+;
+
+		move.w	2(a4),d2	; packet length
+		ror.w	#8,d2		; fix byteorder
+
+		cmp.w	#1518,d2
+		bhi	next_packet	; drop the packet if too long
+; (probably should increment some statistics when dropping oversized packets)
+
+;
+; Do multicast filtering here !!!
+;
+		move.w	$10(a4),d0	; get packet type
+
+		ifd	DEBUG
+		ext.l	d0
+		DMSG	<'Packet type = $%lx',LF>
+		endc
+
+		cmp.w	#1500,d0
+		bhi.s	find_ethernet_ioreq
+
+;
+; IEEE802.3 packet
+;
+		move.w	#1500,d0
+		move.l	du_RxQueue+MLH_HEAD(a3),a2
+find_ieee802_loop
+		move.l	(a2),d1
+		beq	orphan_packet
+		cmp.w	IOS2_PACKETTYPE+2(a2),d0
+		bcc.s	copy_rec_packet
+		move.l	d1,a2
+		bra.s	find_ieee802_loop
+
+find_ethernet_ioreq
+		move.l	du_RxQueue+MLH_HEAD(a3),a2
+
+find_rec_ioreq_loop
+		move.l	(a2),d1
+		beq	orphan_packet
+		cmp.w	IOS2_PACKETTYPE+2(a2),d0
+		beq.s	copy_rec_packet
+		move.l	d1,a2
+		bra.s	find_rec_ioreq_loop
+
+;
+; copy packet to du_RxBuff
+; now a2 points to iorequest
+;
+copy_rec_packet
+		ifd	DEBUG
+		move.l	a2,d0
+		move.l	d2,d1
+		DMSG	<'Copy packet (iorequest = $%lx, packet length = %ld)',LF>
+		endc
+
+		move.b	du_PStop(a3),d0
+		sub.b	du_NextPkt(a3),d0
+		lsl.w	#8,d0
+		subq.w	#4,d0
+; space from packet start to buffer RAM end, in bytes
+; (four bytes of status information before the packet not counted)
+; compare with packet length
+		cmp.w	d0,d2
+		bhi	rec_wrap
+
+		ifd	DEBUG
+		ext.l	d0
+		DMSG	<'Receive with no wrap (space $%lx)',LF>
+		endc
+
+		lea	4(a4),a0
+		lea	du_RxBuff(a3),a1
+		move.w	d2,d0		;packet length
+		addq.w	#3,d0
+		lsr.w	#2,d0
+
+		ifd	DEBUG
+		DMSG	<'Receive copy1 length = $%lx longwords',LF>
+		endc
+		bra.s	rec_copy1_entry
+
+rec_copy1_loop	move.l	(a0)+,(a1)+
+rec_copy1_entry	dbf	d0,rec_copy1_loop
+		bra	packet_copied
+
+rec_wrap
+		ifd	DEBUG
+		ext.l	d0
+		DMSG	<'Receive packet buffer wrap (space $%lx)',LF>
+		endc
+
+		lea	4(a4),a0
+		lea	du_RxBuff(a3),a1
+		move.w	d0,d1
+		lsr.w	#2,d0
+
+		ifd	DEBUG
+		DMSG	<'Receive copy2 length = $%lx longwords',LF>
+		endc
+		bra.s	rec_copy2_entry
+
+rec_copy2_loop	move.l	(a0)+,(a1)+
+rec_copy2_entry	dbf	d0,rec_copy2_loop
+
+		move.b	du_PStart(a3),d0
+		lsl.w	#8,d0
+		move.l	du_BoardAddr1(a3),a0
+		add.w	d0,a0
+
+		ifd	DEBUG
+		DMSG	<'Wrap, continue at $%lx',LF>
+		endc
+
+		move.w	d2,d0	;packet length
+		sub.w	d1,d0
+		addq.w	#3,d0
+		lsr.w	#2,d0
+
+		ifd	DEBUG
+		DMSG	<'Receive copy3 length = $%lx longwords',LF>
+		endc
+		bra.s	rec_copy3_entry
+
+rec_copy3_loop	move.l	(a0)+,(a1)+
+rec_copy3_entry	dbf	d0,rec_copy3_loop
+
+packet_copied
+;
+; probably should move the boundary pointer here...
+;
+		moveq	#-1,d0
+		cmp.l	du_RxBuff(a3),d0
+		bne.s	1$
+		cmp.w	du_RxBuff+4(a3),d0
+		bne.s	1$
+		bset	#SANA2IOB_BCAST,IO_FLAGS(a2)
+1$
+		btst	#0,du_RxBuff(a3)
+		beq.s	2$
+		bset	#SANA2IOB_MCAST,IO_FLAGS(a2)
+2$
+		move.l	du_RxBuff(a3),IOS2_DSTADDR(a2)
+		move.w	du_RxBuff+4(a3),IOS2_DSTADDR+4(a2)
+		move.w	du_RxBuff+6(a3),IOS2_SRCADDR(a2)
+		move.l	du_RxBuff+8(a3),IOS2_SRCADDR+2(a2)
+		move.w	du_RxBuff+12(a3),IOS2_PACKETTYPE+2(a2)
+
+		moveq	#0,d0
+		move.w	d2,d0
+		sub.w	#18,d0
+		ext.l	d0
+		move.l	d0,IOS2_DATALENGTH(a2)
+		lea	du_RxBuff+14(a3),a1
+		
+		btst	#SANA2IOB_RAW,IO_FLAGS(a2)
+		beq.s	3$
+
+		move.w	d2,d0
+		sub.w	#14,a1
+
+3$		move.l	IOS2_DATA(a2),a0
+		move.l	a2,-(sp)
+		move.l	IOS2_BUFFERMANAGEMENT(a2),a2
+		move.l	buffm_CopyToBuff(a2),a2
+		jsr	(a2)
+		move.l	(sp)+,a2
+		tst.l	d0
+		bne.s	4$
+
+		move.b	#S2ERR_SOFTWARE,IO_ERROR(a2)
+		move.b	#S2WERR_BUFF_ERROR,IOS2_WIREERROR+3(a2)
+
+4$		move.l	a2,a1
+		lib	Exec,Remove
+		bsr	TermIO
+
+		addq.l	#1,du_PacketsReceived(a3)
+;
+; do type tracking here!!??
+;
+		bra	next_packet
+
+orphan_packet
+		ifd	DEBUG
+		DMSG	<'Orphan packet',LF>
+		endc
+
+		move.l	du_RxOrphanQueue+MLH_TAILPRED(a3),a2
+		tst.l	MLN_PRED(a2)
+		bne	copy_rec_packet
+
+		ifd	DEBUG
+		DMSG	<'Packet dropped',LF>
+		endc
+
+		addq.l	#1,du_UnknownTypesReceived(a3)
+
+next_packet	move.w	(a4),d0
+		lsr.w	#8,d0
+
+		ifd	DEBUG
+		DMSG	<'Next buffer page = $%lx',LF>
+		endc
+
+		move.b	d0,du_NextPkt(a3)
+		subq.b	#1,d0
+		cmp.b	du_PStart(a3),d0
+		bge.s	1$
+		move.b	du_PStop(a3),d0
+		subq.b	#1,d0
+1$		move.l	du_BoardAddr1(a3),a4
+		move.b	d0,NIC_BNDRY(a4)
+
+		ifd	DEBUG
+		DMSG	<'New Boundary value = $%lx',LF>
+		endc
+
+;
+; should check here if there are any other packets in the receive ring !!!
+; (compare du_NextPkt and NIC_CURR...)
+;
+		bra	nic_int_ok
+
+receive_err
+		ifd	DEBUG
+		DMSG	<'Receive error',LF>
+		endc
+
+		move.b	#ISRF_RXE,NIC_ISR(a4)
+		bra	nic_int_ok
 
 transmit_err
 transmit_ok	and.b	#%1010,d0
-		move.b	d0,NIC_ISR(a0)		;clear interrupt
+		move.b	d0,NIC_ISR(a4)		;clear interrupt
 
 		ifd	DEBUG
 		DMSG	<'Transmit complete interrupt (%lx)',LF>
@@ -1262,7 +1689,7 @@ nic_int_ok	moveq	#1,d0
 nic_int_continue
 		moveq	#0,d0
 
-nic_int_end	movem.l	(sp)+,a2/a3/a6
+nic_int_end	movem.l	(sp)+,d2/a2/a3/a4/a6
 		rts
 
 ;;;;

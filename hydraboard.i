@@ -65,16 +65,58 @@ NIC_MAR6	equ	$7ffd
 NIC_MAR7	equ	$7fff
 
 ;
-; command register bit values
+; command register bits
 ;
-	BITDEF	CMD,STOP,0
-	BITDEF	CMD,START,1
-	BITDEF	CMD,TRANSMIT,2
-	BITDEF	CMD,RREAD,3
-	BITDEF	CMD,RWRITE,4
-	BITDEF	CMD,NODMA,5
-	BITDEF	CMD,PAGE0,6
-	BITDEF	CMD,PAGE1,7
+	BITDEF	CR,STOP,0	; Software reset command
+	BITDEF	CR,START,1	; Bit used to activate NIC
+	BITDEF	CR,TRANSMIT,2	; Transmit packet command
+	BITDEF	CR,RREAD,3	; Remote DMA Read
+	BITDEF	CR,RWRITE,4	; Remote DMA Write
+	BITDEF	CR,NODMA,5	; No Remote DMA
+	BITDEF	CR,PAGE0,6	; Page select bit 0
+	BITDEF	CR,PAGE1,7	; Page select bit 1
+
+;
+; interrupt status register bits
+;
+	BITDEF	ISR,PRX,0	; Packet received without errors
+	BITDEF	ISR,PTX,1	; Packet transmitted without errors
+	BITDEF	ISR,RXE,2	; Receive error
+	BITDEF	ISR,TXE,3	; Transmit error
+	BITDEF	ISR,OVW,4	; Buffer overwrite warning
+	BITDEF	ISR,CNT,5	; Network tally counter overflow
+	BITDEF	ISR,RDC,6	; Remote DMA complete
+	BITDEF	ISR,RST,7	; Reset status (not an interrupt)
+
+;
+; transmit configuration register bits
+;
+	BITDEF	TCR,CRC,0	; CRC disable
+	BITDEF	TCR,LB0,1	; loopback select 0
+	BITDEF	TCR,LB1,2	; loopback select 1
+	BITDEF	TCR,ATD,3	; auto transmit disable
+	BITDEF	TCR,OFST,4	; Collision offset enable
+
+;
+; receive configuration register bits
+;
+	BITDEF	RCR,SEP,0	; Save errored packets
+	BITDEF	RCR,AR,1	; Accept runt packets
+	BITDEF	RCR,AB,2	; Accept broadcast
+	BITDEF	RCR,AM,3	; Accept multicast
+	BITDEF	RCR,PRO,4	; Promiscuous mode
+	BITDEF	RCR,MON,5	; Monitor mode
+
+;
+; data configuration register bits
+;
+	BITDEF	DCR,WTS,0	; Word transfer select
+	BITDEF	DCR,BOS,1	; Byte order select
+	BITDEF	DCR,LAS,2	; Long address select
+	BITDEF	DCR,LS,3	; Loopback select
+	BITDEF	DCR,AR,4	; Auto initialize remote
+	BITDEF	DCR,FT0,5	; FIFO threshold 0
+	BITDEF	DCR,FT1,6	; FIFO threshold 1
 
 ;
 ; Ethernet address PROM

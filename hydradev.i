@@ -64,6 +64,3 @@ EADDR_BYTES	equ	6
 		LABEL buffm_Sizeof
 
 ;
-DEV_VERSION	equ	1
-DEV_REVISION	equ	3
-
