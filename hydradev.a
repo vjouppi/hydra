@@ -4,9 +4,7 @@
 ; Timo Rossi, 1992
 ;
 
-;
-; WARNING: Still preliminary version!!
-;
+; WARNING: preliminary version
 
 ;
 ; notes:
@@ -17,12 +15,12 @@
 ;	  - SoftMisses-field is missing
 ;	(SoftMisses has been replaced by an unused field in newer includes)
 ;
-; (Disable/Enable should be replaced with routines that only disable/enable
-; the PORTS/ExtLevel2 interrupt)
+;	- packet types <= 1500 are ieee802.3 length fields
+;
+; (Disable/Enable should probably be replaced with routines that only
+; disable/enable the PORTS/ExtLevel2 interrupt)
 ;
 
-;
-; not all global stats are properly updated.
 ;
 ; 1.9 -- 1992-11-27
 ;	- added buffer overflow check (untested)
@@ -32,8 +30,9 @@
 ; 1.11	- fixed AbortIO()
 ;	- added S2_ONEVENT and event handling
 ;	- fixed expunge
-; 1.13	- added type tracking
-; 1.14
+; 1.14	- added type tracking
+; 1.15	- added promiscuous mode
+; 1.16	- small changes (event handling)
 ;
 
 ;
@@ -91,7 +90,7 @@ Ciaa		equ	$bfe001
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	14
+DEV_REVISION	equ	16
 
 ;
 ; start of the first hunk of the device file
@@ -225,8 +224,6 @@ dev_Reserved	moveq	#0,d0
 ; Return:
 ;   d0  -  zero if successfull, error code if failure
 ;
-; (Note: promiscuous mode flag is currently ignored!!)
-;
 dev_Open	movem.l	d2/d3/a2/a3,-(sp)
 
 		ifd	DEBUG
@@ -246,7 +243,7 @@ dev_Open	movem.l	d2/d3/a2/a3,-(sp)
 		move.l	d2,d0
 		bsr	Initialize_Unit
 		tst.l	d0
-		beq.b	open_fail
+		beq	open_fail
 
 		move.l	d0,dev_UnitTable(a6,d2.l)
 
@@ -268,7 +265,23 @@ excl_ok2	move.l	IOS2_BUFFERMANAGEMENT(a2),a1
 		move.l	d0,IOS2_BUFFERMANAGEMENT(a2)
 		beq.b	open_fail
 
-		move.l	a3,IO_UNIT(a2)
+		btst	#SANA2OPB_PROM,d3
+		beq.b	open_ok1
+;
+; open in promiscuous mode
+; use buffm_Flags so we remember to decrement PromCount in close
+;
+		addq.w	#1,du_PromCount(a3)
+		move.l	IOS2_BUFFERMANAGEMENT(a2),a0
+		bset	#BFMB_PROM,buffm_Flags(a0)
+		move.l	du_BoardAddr1(a3),a0
+		move.b	#RCRF_PRO!RCRF_AB!RCRF_AM,NIC_RCR(a0)
+
+		ifd	DEBUG
+		DMSG	<'Enabled promiscuous mode',LF>
+		endc
+
+open_ok1	move.l	a3,IO_UNIT(a2)
 		addq.w	#1,UNIT_OPENCNT(a3)
 		addq.w	#1,LIB_OPENCNT(a6)
 		and.b	#~LIBF_DELEXP,LIB_FLAGS(a6)
@@ -329,7 +342,22 @@ dev_Close	movem.l	a2/a3,-(sp)
 
 		subq.w	#1,UNIT_OPENCNT(a3)
 
-		moveq	#0,d0
+		move.l	IOS2_BUFFERMANAGEMENT(a2),a0
+		btst	#BFMB_PROM,buffm_Flags(a0)
+		beq.b	close_1
+
+		subq.w	#1,du_PromCount(a3)
+		bne.b	close_1
+
+; disable promiscuous mode
+		move.l	du_BoardAddr1(a3),a0
+		move.b	#RCRF_AB!RCRF_AM,NIC_RCR(a0)
+
+		ifd	DEBUG
+		DMSG	<'Disabled promiscuous mode',LF>
+		endc
+
+close_1		moveq	#0,d0
 		subq.w	#1,LIB_OPENCNT(a6)
 		bne.b	close_end
 		btst	#LIBB_DELEXP,LIB_FLAGS(a6)
@@ -1059,7 +1087,7 @@ already_tracked	lib	Permit
 track_alloc_fail
 		lib	Permit
 		move.l	(sp)+,a6
-		move.l	#S2EVENT_SOFTWARE,d0
+		move.l	#S2EVENT_ERROR!S2EVENT_SOFTWARE,d0
 		bsr	DoEvent
 		moveq	#S2ERR_NO_RESOURCES,d0
 		moveq	#0,d1
@@ -1840,7 +1868,7 @@ not_online	move.b	#S2ERR_OUTOFSERVICE,d0
 		move.b	#S2WERR_UNIT_OFFLINE,d1
 		bra	IOError
 
-mtu_exceeded	moveq	#S2EVENT_ERROR!S2EVENT_TX,d0
+mtu_exceeded	move.l	#S2EVENT_ERROR!S2EVENT_TX!S2EVENT_SOFTWARE,d0
 		bsr	DoEvent
 
 		move.b	#S2ERR_MTU_EXCEEDED,d0
@@ -1980,7 +2008,7 @@ doevent_loop	move.l	(a2),d2
 
 		move.b	d3,d0
 		and.b	IOS2_WIREERROR+3(a2),d0
-		beq.s	doevent_next
+		beq.b	doevent_next
 
 		move.b	d0,IOS2_WIREERROR+3(a2)
 
@@ -2111,11 +2139,12 @@ NIC_IntRoutine	movem.l	d2/a2/a3/a4/a6,-(sp)
 		btst	#ISRB_RXE,d0
 		bne	receive_err
 
-;
+;!!
 ; handle all other interrupts here (there shouldn't be any...)
-;
+; (note: tally counter interrupts are currently ignored)
+;!!
 		move.b	d0,NIC_ISR(a4)
-		bra	nic_int_ok		;!!!!
+		bra	nic_int_ok
 
 receive_ok	move.b	#ISRF_PRX,NIC_ISR(a4)		; clear interrupt
 
@@ -2490,7 +2519,7 @@ receive_err
 		addq.l	#1,du_BadPackets(a3)
 		move.b	#ISRF_RXE,NIC_ISR(a4)
 
-		moveq	#S2EVENT_ERROR!S2EVENT_RX,d0
+		moveq	#S2EVENT_ERROR!S2EVENT_RX!S2EVENT_HARDWARE,d0
 		bsr	DoEvent
 		bra	nic_int_ok
 
@@ -2513,7 +2542,7 @@ transmit_ok	and.b	#%1010,d0
 		move.b	#S2ERR_NO_RESOURCES,IO_ERROR(a0)
 		clr.b	IOS2_WIREERROR(a0)
 
-		moveq	#S2EVENT_ERROR!S2EVENT_TX,d0
+		move.l	#S2EVENT_ERROR!S2EVENT_TX!S2EVENT_HARDWARE,d0
 		bsr	DoEvent
 
 		bra.b	term_tx
@@ -2600,7 +2629,7 @@ busy_loop	tst.b	Ciaa+ciapra	; read a CIA location
 
 		move.b	NIC_ISR(a4),d0		; read interrupt status
 		and.b	#ISRF_PTX!ISRF_TXE,d0	; completed?
-		beq.s	recb1
+		beq.b	recb1
 
 		clr.b	d2			; clear resend flag
 
@@ -2626,11 +2655,14 @@ recb1		move.b	#TCRF_LB1,NIC_TCR(a4)		; loopback mode
 		move.b	#0,NIC_TCR(a4)	; loopback off
 
 		btst	#CRB_TRANSMIT,d2
-		beq.b	nic_int_ok
+		beq.b	overflow_ok
 ;
 ; retransmit the current packet
 ;
 		move.b	#CRF_NODMA!CRF_TRANSMIT!CRF_START,NIC_CR(a4)
+
+overflow_ok	move.l	#S2EVENT_ERROR!S2EVENT_RX!S2EVENT_HARDWARE,d0
+		bsr	DoEvent
 ;
 ;
 nic_int_ok	moveq	#1,d0

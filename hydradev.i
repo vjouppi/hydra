@@ -14,6 +14,7 @@ EADDR_BYTES	equ	6
 
 		 APTR	dev_ExpansionBase
 		 APTR	dev_IntuitionBase
+
 		 STRUCT	dev_UnitTable,NUM_UNITS*4
 		LABEL dev_DataSize
 
@@ -49,13 +50,13 @@ EADDR_BYTES	equ	6
 		 STRUCT	du_LastStart,TV_SIZE
 		 STRUCT	du_TxBuff,PACKETBUFSIZE
 		 STRUCT	du_RxBuff,PACKETBUFSIZE
+		 UWORD	du_PromCount
 		LABEL du_Sizeof
 
 		BITDEF	UNIT,CONFIGURED,2
 		BITDEF	UNIT,ONLINE,3
 		BITDEF	UNIT,CURRENTTX,4
 		BITDEF	UNIT,EXCLUSIVE,5
-
 ;
 ; an extra IORequest flag
 ;
@@ -85,5 +86,8 @@ EADDR_BYTES	equ	6
 		STRUCTURE BuffManagement,0
 		 APTR	buffm_CopyToBuff
 		 APTR	buffm_CopyFromBuff
+		 UBYTE	buffm_Flags
 		LABEL buffm_Sizeof
+
+		BITDEF	BFM,PROM,0
 
