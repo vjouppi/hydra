@@ -6,10 +6,8 @@
 ;
 ; hydradev.a  --  sanaII device driver for Hydra Systems ethernet card
 ;
-; Timo Rossi, 1992
+; Timo Rossi, 1992-1994
 ;
-
-; WARNING: preliminary version
 
 ;
 ; notes:
@@ -91,6 +89,12 @@
 ; 1.36 -- trying to add multiple read queues
 ; 1.37 -- fixed device name
 ;
+; 1.38 -- added Disable()/Enable() in CookieList handling
+;	  in Open() and Close() routines.
+;	  Fixed a bug in find_rec_ioreq_loop, it jumped to orphan_packet,
+;	  where it should jump to find_rec_ioreq_cookie_next...
+;
+;
 ; if DEBUG is defined, the device writes a lot of debugging
 ; info to the serial port (with RawPutChar())
 ;
@@ -155,7 +159,7 @@ NIC_Delay	macro
 
 
 DEV_VERSION	equ	1
-DEV_REVISION	equ	37
+DEV_REVISION	equ	38
 
 ;
 ; start of the first hunk of the device file
@@ -333,8 +337,13 @@ excl_ok2	move.l	IOS2_BUFFERMANAGEMENT(a2),a1
 		move.l	a6,-(sp)
 		move.l	dev_SysBase(a6),a6
 		move.l	d0,a1
+;
+; Remember to Disable() when accessing the cookie list
+;
+		lib	Disable
 		lea	du_CookieList(a3),a0
 		lib	AddHead
+		lib	Enable
 		move.l	(sp)+,a6
 
 		btst	#SANA2OPB_PROM,d3
@@ -410,8 +419,13 @@ dev_Close	movem.l	a2/a3,-(sp)
 
 		move.l	a6,-(sp)
 		move.l	dev_SysBase(a6),a6
+;
+; Remember to Disable() when accessing the cookie list
+;
+		lib	Disable
 		move.l	IOS2_BUFFERMANAGEMENT(a2),a1
 		lib	Remove
+		lib	Enable
 		move.l	IOS2_BUFFERMANAGEMENT(a2),a1
 		moveq	#cookie_Sizeof,d0
 		lib	FreeMem
@@ -2528,7 +2542,8 @@ find_rec_ioreq_cookie_loop
 
 find_rec_ioreq_loop
 		tst.l	(a2)
-		beq	orphan_packet
+		beq	find_rec_ioreq_cookie_next
+
 		cmp.w	IOS2_PACKETTYPE+2(a2),d3
 		bne.b	find_rec_ioreq_next
 		tst.b	d4
