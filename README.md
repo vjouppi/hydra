@@ -9,4 +9,4 @@ source code:
 
 - Graham Heggie, the creator of the Amiganet hardware
 - Jukka Marin, the owner of JMP Electronics
-- Teemu Marin, Timo's brother
+- Teemu Rossi, Timo's brother
